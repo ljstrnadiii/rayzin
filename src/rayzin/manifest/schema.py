@@ -8,8 +8,10 @@ from rayzin.types import (
     COL_COUNT,
     COL_DIM,
     COL_DISTANCE,
-    COL_LOWER_BOUND,
+    COL_LOWER_BOUNDS,
+    COL_MIN_LOWER_BOUND,
     COL_OFFSET,
+    COL_QUERY_ID,
     COL_RADIUS,
     COL_SLICE,
     COL_START,
@@ -44,10 +46,13 @@ MANIFEST_SCHEMA: pa.Schema = pa.schema(
     ]
 )
 
-LOWER_BOUND_SCHEMA: pa.Schema = MANIFEST_SCHEMA.append(pa.field(COL_LOWER_BOUND, pa.float32()))
+LOWER_BOUND_SCHEMA: pa.Schema = MANIFEST_SCHEMA.append(
+    pa.field(COL_LOWER_BOUNDS, pa.list_(pa.float32()))
+).append(pa.field(COL_MIN_LOWER_BOUND, pa.float32()))
 
 SEARCH_RESULT_SCHEMA: pa.Schema = pa.schema(
     [
+        pa.field(COL_QUERY_ID, pa.int64()),
         pa.field(COL_CHUNK_ID, pa.string()),
         pa.field(COL_URL, pa.string()),
         pa.field(COL_SLICE, INDEX_SLICE_TYPE),
@@ -60,6 +65,7 @@ BLOCK_SEARCH_SUMMARY_SCHEMA: pa.Schema = pa.schema(
     [
         pa.field("rows_seen", pa.int64()),
         pa.field("rows_searched", pa.int64()),
+        pa.field("query_evaluations", pa.int64()),
         pa.field("results_added", pa.int64()),
     ]
 )

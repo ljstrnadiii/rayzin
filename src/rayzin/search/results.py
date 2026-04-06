@@ -6,6 +6,7 @@ from rayzin.types import (
     COL_DIM,
     COL_DISTANCE,
     COL_OFFSET,
+    COL_QUERY_ID,
     COL_SLICE,
     COL_START,
     COL_STOP,
@@ -25,6 +26,7 @@ def format_chunk_id(chunk: ChunkRef) -> str:
 def search_result_table(results: SearchResults) -> SearchResultTable:
     return pa.Table.from_pydict(
         {
+            COL_QUERY_ID: results.query_ids,
             COL_CHUNK_ID: [format_chunk_id(chunk) for chunk in results.chunks],
             COL_URL: [chunk[COL_URL] for chunk in results.chunks],
             COL_SLICE: [chunk[COL_SLICE] for chunk in results.chunks],

@@ -22,92 +22,141 @@ ChunkKey = tuple[str, tuple[tuple[str, int, int], ...]]
 class FaissResultHeap(SearchResultHeap):
     """Top-k heap backed by faiss.ResultHeap for distance selection."""
 
-    def __init__(self, k: int) -> None:
+    def __init__(self, nq: int, k: int) -> None:
+        self._nq = nq
         self._k = k
         self._heap: Any
         self._chunk_refs: list[ChunkRef]
         self._chunk_index_by_key: dict[ChunkKey, int]
-        self._result_metadata: dict[int, tuple[int, int]]
+        self._result_metadata: dict[int, tuple[int, int, int]]
         self._next_result_id: int
-        self._size: int
+        self._sizes: Int64Array
         self.clear()
 
     @property
-    def tau(self) -> float:
-        return float(self._heap.D[0, 0]) if self._size == self._k else float("inf")
+    def tau(self) -> Float32Array:
+        tau = np.asarray(self._heap.D[:, 0], dtype=np.float32)
+        return np.asarray(
+            np.where(self._sizes == self._k, tau, np.float32(float("inf"))),
+            dtype=np.float32,
+        )
 
-    def add(
+    def add_result_subset(
         self,
-        distances: np.ndarray,
+        query_ids: Int64Array,
+        distances: Float32Array,
         chunk: ChunkRef,
-        offsets: np.ndarray,
-    ) -> tuple[Int64Array, Float32Array]:
-        if len(distances) == 0:
-            return (
-                np.empty(0, dtype=np.int64),
-                np.empty(0, dtype=np.float32),
+        offsets: Int64Array,
+    ) -> SearchResults:
+        query_index_array = np.asarray(query_ids, dtype=np.int64)
+        distance_matrix = np.asarray(distances, dtype=np.float32)
+        offset_matrix = np.asarray(offsets, dtype=np.int64)
+        if distance_matrix.shape != offset_matrix.shape:
+            msg = (
+                "Expected distances and offsets to have the same shape, got "
+                f"{distance_matrix.shape!r} and {offset_matrix.shape!r}."
             )
+            raise ValueError(msg)
+        if distance_matrix.ndim != 2:
+            msg = (
+                "Expected distances to have shape (n_active, k_eff), got "
+                f"{distance_matrix.shape!r}."
+            )
+            raise ValueError(msg)
+        if distance_matrix.shape[0] != len(query_index_array):
+            msg = (
+                "Expected one distance row per active query, got "
+                f"{distance_matrix.shape[0]} rows for {len(query_index_array)} query ids."
+            )
+            raise ValueError(msg)
+        if distance_matrix.size == 0:
+            return SearchResults(query_ids=[], chunks=[], offsets=[], distances=[])
 
         chunk_index = self._chunk_index(chunk)
-        added_offsets: list[int] = []
-        added_distances: list[float] = []
-        for distance, offset in zip(distances.tolist(), offsets.tolist()):
-            result_id = self._next_result_id
-            self._result_metadata[result_id] = (chunk_index, int(offset))
-            self._next_result_id += 1
+        result_ids = np.empty(distance_matrix.shape, dtype=np.int64)
+        for row_index, query_id in enumerate(query_index_array.tolist()):
+            for col_index, offset in enumerate(offset_matrix[row_index].tolist()):
+                result_id = self._next_result_id
+                self._result_metadata[result_id] = (int(query_id), chunk_index, int(offset))
+                self._next_result_id += 1
+                result_ids[row_index, col_index] = result_id
 
-            self._heap.add_result(
-                np.asarray([[distance]], dtype=np.float32),
-                np.asarray([[result_id]], dtype=np.int64),
-            )
-            self._size = min(self._k, self._size + 1)
-            live_ids = self._live_ids()
-            if result_id in live_ids:
-                added_offsets.append(int(offset))
-                added_distances.append(float(distance))
-            self._prune_metadata(live_ids)
-        return (
-            np.asarray(added_offsets, dtype=np.int64),
-            np.asarray(added_distances, dtype=np.float32),
+        self._heap.add_result_subset(query_index_array, distance_matrix, result_ids)
+        self._sizes[query_index_array] = np.minimum(
+            self._k,
+            self._sizes[query_index_array] + distance_matrix.shape[1],
+        )
+        live_ids = self._live_ids()
+
+        added_query_ids: list[int] = []
+        added_chunks: list[ChunkRef] = []
+        added_distances: list[float] = []
+        added_offsets: list[int] = []
+        for row_index, query_id in enumerate(query_index_array.tolist()):
+            for col_index, result_id in enumerate(result_ids[row_index].tolist()):
+                if result_id in live_ids:
+                    added_query_ids.append(int(query_id))
+                    added_chunks.append(chunk)
+                    added_offsets.append(int(offset_matrix[row_index, col_index]))
+                    added_distances.append(float(distance_matrix[row_index, col_index]))
+        self._prune_metadata(live_ids)
+        return SearchResults(
+            query_ids=added_query_ids,
+            chunks=added_chunks,
+            offsets=added_offsets,
+            distances=added_distances,
         )
 
     def clear(self) -> None:
-        self._heap = faiss.ResultHeap(1, self._k, keep_max=False)
+        self._heap = faiss.ResultHeap(self._nq, self._k, keep_max=False)
         self._chunk_refs = []
         self._chunk_index_by_key = {}
         self._result_metadata = {}
         self._next_result_id = 0
-        self._size = 0
+        self._sizes = np.zeros(self._nq, dtype=np.int64)
 
     def add_results(self, results: SearchResults) -> int:
-        for chunk, offset, distance in zip(
+        for query_id, chunk, offset, distance in zip(
+            results.query_ids,
             results.chunks,
             results.offsets,
             results.distances,
         ):
-            self.add(
-                np.asarray([distance], dtype=np.float32),
+            self.add_result_subset(
+                np.asarray([query_id], dtype=np.int64),
+                np.asarray([[distance]], dtype=np.float32),
                 chunk,
-                np.asarray([offset], dtype=np.int64),
+                np.asarray([[offset]], dtype=np.int64),
             )
         return len(results.offsets)
 
     def results(self) -> SearchResults:
         self._heap.finalize()
-        heap_ids = np.asarray(self._heap.I[0], dtype=np.int64)
-        heap_distances = np.asarray(self._heap.D[0], dtype=np.float32)
+        heap_ids = np.asarray(self._heap.I, dtype=np.int64)
+        heap_distances = np.asarray(self._heap.D, dtype=np.float32)
 
+        query_ids: list[int] = []
         chunks: list[ChunkRef] = []
         offsets: list[int] = []
         distances: list[float] = []
-        for result_id, distance in zip(heap_ids.tolist(), heap_distances.tolist()):
-            if result_id < 0:
-                continue
-            chunk_index, offset = self._result_metadata[int(result_id)]
-            chunks.append(self._chunk_refs[chunk_index])
-            offsets.append(offset)
-            distances.append(float(distance))
-        return SearchResults(chunks=chunks, offsets=offsets, distances=distances)
+        for query_id in range(self._nq):
+            for result_id, distance in zip(
+                heap_ids[query_id].tolist(),
+                heap_distances[query_id].tolist(),
+            ):
+                if result_id < 0:
+                    continue
+                _, chunk_index, offset = self._result_metadata[int(result_id)]
+                query_ids.append(query_id)
+                chunks.append(self._chunk_refs[chunk_index])
+                offsets.append(offset)
+                distances.append(float(distance))
+        return SearchResults(
+            query_ids=query_ids,
+            chunks=chunks,
+            offsets=offsets,
+            distances=distances,
+        )
 
     def _chunk_index(self, chunk: ChunkRef) -> int:
         key = _chunk_key(chunk)
@@ -120,11 +169,12 @@ class FaissResultHeap(SearchResultHeap):
         self._chunk_index_by_key[key] = index
         return index
 
-    def _live_ids(self) -> set[int]:
+    def _live_ids(self, query_ids: Int64Array | None = None) -> set[int]:
+        heap_ids = np.asarray(self._heap.I, dtype=np.int64)
+        if query_ids is not None and len(query_ids) > 0:
+            heap_ids = heap_ids[np.asarray(query_ids, dtype=np.int64)]
         return {
-            int(result_id)
-            for result_id in np.asarray(self._heap.I[0], dtype=np.int64).tolist()
-            if int(result_id) >= 0
+            int(result_id) for result_id in heap_ids.reshape(-1).tolist() if int(result_id) >= 0
         }
 
     def _prune_metadata(self, live_ids: set[int] | None = None) -> None:
@@ -148,26 +198,30 @@ class FaissSearchBackend:
         self._metric_type = metric_type
         self._use_gpu = use_gpu
 
-    def create_heap(self, k: int) -> SearchResultHeap:
-        return FaissResultHeap(k)
+    def create_heap(self, nq: int, k: int) -> SearchResultHeap:
+        return FaissResultHeap(nq, k)
 
     def search(
-        self, vectors: Float32Array, query: Float32Array, k: int
+        self, vectors: Float32Array, queries: Float32Array, k: int
     ) -> tuple[Float32Array, Int64Array]:
+        query_matrix = np.asarray(queries, dtype=np.float32)
+        if query_matrix.ndim != 2:
+            msg = f"Expected queries to have shape (nq, d), got {query_matrix.shape!r}."
+            raise ValueError(msg)
         if len(vectors) == 0:
             return (
-                np.empty(0, dtype=np.float32),
-                np.empty(0, dtype=np.int64),
+                np.empty((len(query_matrix), 0), dtype=np.float32),
+                np.empty((len(query_matrix), 0), dtype=np.int64),
             )
 
-        vectors32, query32 = _prepare_inputs(vectors, query, self._metric_type)
+        vectors32, query32 = _prepare_inputs(vectors, query_matrix, self._metric_type)
         index = _build_index(vectors32.shape[1], self._metric_type, self._use_gpu)
         index.add(vectors32)
         distances, indices = index.search(query32, min(k, len(vectors32)))
-        flat_distances = np.asarray(distances[0], dtype=np.float32)
+        flat_distances = np.asarray(distances, dtype=np.float32)
         if self._metric_type == MetricType.COSINE:
             flat_distances = np.asarray(1.0 - flat_distances, dtype=np.float32)
-        return flat_distances, np.asarray(indices[0], dtype=np.int64)
+        return flat_distances, np.asarray(indices, dtype=np.int64)
 
     def radius_search(
         self, vectors: Float32Array, query: Float32Array, radius: float
@@ -211,11 +265,13 @@ def _build_index(
 
 def _prepare_inputs(
     vectors: Float32Array,
-    query: Float32Array,
+    queries: Float32Array,
     metric_type: MetricType,
 ) -> tuple[Float32Array, Float32Array]:
     vectors32 = np.asarray(vectors, dtype=np.float32, order="C").copy()
-    query32 = np.asarray(query, dtype=np.float32, order="C").reshape(1, -1).copy()
+    query32 = np.asarray(queries, dtype=np.float32, order="C").copy()
+    if query32.ndim == 1:
+        query32 = query32.reshape(1, -1)
     if metric_type == MetricType.COSINE:
         faiss.normalize_L2(vectors32)
         faiss.normalize_L2(query32)

@@ -5,7 +5,7 @@ import pytest
 
 from rayzin.manifest.schema import MANIFEST_SCHEMA
 from rayzin.metrics import CosineMetric, EuclideanMetric, add_lower_bounds_fn
-from rayzin.types import COL_LOWER_BOUND
+from rayzin.types import COL_LOWER_BOUNDS, COL_MIN_LOWER_BOUND
 
 
 @pytest.fixture
@@ -36,7 +36,7 @@ def test_lower_bound_positive_when_query_outside_ball(euclidean_metric: Euclidea
 def test_add_lower_bounds_matches_faiss_l2_pruning() -> None:
     centroids = np.array([[1.0, 0.0], [0.0, 1.0]], dtype=np.float32)
     radii = np.array([0.1, 0.1], dtype=np.float32)
-    query = np.array([1.0, 0.0], dtype=np.float32)
+    queries = np.array([[1.0, 0.0], [0.0, 1.0]], dtype=np.float32)
     batch = pa.Table.from_pydict(
         {
             "url": ["a", "b"],
@@ -52,19 +52,29 @@ def test_add_lower_bounds_matches_faiss_l2_pruning() -> None:
     )
 
     lower_bounds = np.asarray(
-        add_lower_bounds_fn(batch, query=query, metric_type="euclidean")
-        .column(COL_LOWER_BOUND)
+        add_lower_bounds_fn(batch, queries=queries, metric_type="euclidean")
+        .column(COL_LOWER_BOUNDS)
+        .to_pylist(),
+        dtype=np.float32,
+    )
+    min_lower_bounds = np.asarray(
+        add_lower_bounds_fn(batch, queries=queries, metric_type="euclidean")
+        .column(COL_MIN_LOWER_BOUND)
         .to_pylist(),
         dtype=np.float32,
     )
     index = faiss.IndexFlatL2(2)
     index.add(centroids)
-    distances, indices = index.search(query[None, :], len(centroids))
-    expected_distances = np.empty(len(centroids), dtype=np.float32)
-    expected_distances[indices[0]] = distances[0]
-    expected_lower_bounds = np.square(np.maximum(0.0, np.sqrt(expected_distances) - radii))
+    distances, indices = index.search(queries, len(centroids))
+    expected_distances = np.empty((len(queries), len(centroids)), dtype=np.float32)
+    row_indices = np.arange(len(queries))[:, None]
+    expected_distances[row_indices, indices] = distances
+    expected_lower_bounds = np.square(
+        np.maximum(0.0, np.sqrt(expected_distances.T) - radii[:, None]),
+    )
 
     np.testing.assert_allclose(lower_bounds, expected_lower_bounds, atol=1e-6)
+    np.testing.assert_allclose(min_lower_bounds, expected_lower_bounds.min(axis=1), atol=1e-6)
 
 
 def test_euclidean_pairwise_matches_faiss_l2(euclidean_metric: EuclideanMetric) -> None:

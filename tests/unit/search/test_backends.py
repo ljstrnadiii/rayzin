@@ -13,25 +13,25 @@ def backend() -> NumpySearchBackend:
 def test_search_returns_k_results(backend: NumpySearchBackend) -> None:
     rng = np.random.default_rng(0)
     vectors = rng.standard_normal((100, 16)).astype(np.float32)
-    query = rng.standard_normal(16).astype(np.float32)
-    distances, indices = backend.search(vectors, query, k=5)
-    assert len(distances) == 5
-    assert len(indices) == 5
+    queries = rng.standard_normal((2, 16)).astype(np.float32)
+    distances, indices = backend.search(vectors, queries, k=5)
+    assert distances.shape == (2, 5)
+    assert indices.shape == (2, 5)
 
 
 def test_search_sorted_ascending(backend: NumpySearchBackend) -> None:
     rng = np.random.default_rng(1)
     vectors = rng.standard_normal((50, 8)).astype(np.float32)
-    query = rng.standard_normal(8).astype(np.float32)
-    distances, _ = backend.search(vectors, query, k=10)
-    assert list(distances) == sorted(distances)
+    queries = rng.standard_normal((3, 8)).astype(np.float32)
+    distances, _ = backend.search(vectors, queries, k=10)
+    assert np.all(distances == np.sort(distances, axis=1))
 
 
 def test_search_finds_exact_nearest(backend: NumpySearchBackend) -> None:
     vectors = np.eye(4, dtype=np.float32)
-    query = np.array([1.0, 0.0, 0.0, 0.0], dtype=np.float32)
-    _, indices = backend.search(vectors, query, k=1)
-    assert indices[0] == 0
+    queries = np.array([[1.0, 0.0, 0.0, 0.0]], dtype=np.float32)
+    _, indices = backend.search(vectors, queries, k=1)
+    assert indices[0, 0] == 0
 
 
 def test_radius_search_returns_all_within_radius(backend: NumpySearchBackend) -> None:
@@ -45,16 +45,16 @@ def test_radius_search_returns_all_within_radius(backend: NumpySearchBackend) ->
 def test_faiss_backend_matches_numpy_for_l2() -> None:
     rng = np.random.default_rng(7)
     vectors = rng.standard_normal((32, 8)).astype(np.float32)
-    query = rng.standard_normal(8).astype(np.float32)
+    queries = rng.standard_normal((3, 8)).astype(np.float32)
 
     numpy_distances, numpy_indices = NumpySearchBackend(metric_type=MetricType.EUCLIDEAN).search(
         vectors,
-        query,
+        queries,
         k=5,
     )
     faiss_distances, faiss_indices = FaissSearchBackend(metric_type=MetricType.EUCLIDEAN).search(
         vectors,
-        query,
+        queries,
         k=5,
     )
 
@@ -65,16 +65,16 @@ def test_faiss_backend_matches_numpy_for_l2() -> None:
 def test_faiss_backend_matches_numpy_for_cosine() -> None:
     rng = np.random.default_rng(17)
     vectors = rng.standard_normal((32, 8)).astype(np.float32)
-    query = rng.standard_normal(8).astype(np.float32)
+    queries = rng.standard_normal((3, 8)).astype(np.float32)
 
     numpy_distances, numpy_indices = NumpySearchBackend(metric_type=MetricType.COSINE).search(
         vectors,
-        query,
+        queries,
         k=5,
     )
     faiss_distances, faiss_indices = FaissSearchBackend(metric_type=MetricType.COSINE).search(
         vectors,
-        query,
+        queries,
         k=5,
     )
 

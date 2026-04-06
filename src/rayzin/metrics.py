@@ -30,8 +30,13 @@ class EuclideanMetric:
         return float(np.dot(delta, delta))
 
     def pairwise(self, vectors: Float32Array, query: Float32Array) -> Float32Array:
-        deltas = np.asarray(vectors - query[None, :], dtype=np.float32)
-        return np.asarray(np.sum(deltas * deltas, axis=1, dtype=np.float32), dtype=np.float32)
+        query_array = np.asarray(query, dtype=np.float32)
+        if query_array.ndim == 1:
+            deltas = np.asarray(vectors - query_array[None, :], dtype=np.float32)
+            return np.asarray(np.sum(deltas * deltas, axis=1, dtype=np.float32), dtype=np.float32)
+
+        deltas = np.asarray(vectors[None, :, :] - query_array[:, None, :], dtype=np.float32)
+        return np.asarray(np.sum(deltas * deltas, axis=2, dtype=np.float32), dtype=np.float32)
 
     def lower_bound(self, query: Float32Array, centroid: Float32Array, radius: float) -> float:
         centroid_distance = float(np.linalg.norm(query - centroid))
@@ -47,7 +52,11 @@ class CosineMetric:
     def pairwise(self, vectors: Float32Array, query: Float32Array) -> Float32Array:
         normalized_vectors = _normalize(vectors)
         normalized_query = _normalize(query)
-        scores = normalized_vectors @ normalized_query
+        if normalized_query.ndim == 1:
+            scores = normalized_vectors @ normalized_query
+            return np.asarray(1.0 - scores, dtype=np.float32)
+
+        scores = normalized_query @ normalized_vectors.T
         return np.asarray(1.0 - scores, dtype=np.float32)
 
     def lower_bound(self, query: Float32Array, centroid: Float32Array, radius: float) -> float:
@@ -68,27 +77,31 @@ def make_metric(metric_type: MetricType) -> Metric:
 
 def add_lower_bounds_fn(
     batch: ManifestTable,
-    query: Float32Array,
+    queries: Float32Array,
     metric_type: str,
 ) -> LowerBoundTable:
-    return _add_lower_bounds(batch, query=query, metric_type=metric_type)
+    return _add_lower_bounds(batch, queries=queries, metric_type=metric_type)
 
 
 def _add_lower_bounds(
     batch: ManifestTable,
-    query: Float32Array,
+    queries: Float32Array,
     metric_type: str,
 ) -> LowerBoundTable:
-    metric = make_metric(MetricType(metric_type))
+    query_matrix = np.asarray(queries, dtype=np.float32)
+    if query_matrix.ndim != 2:
+        msg = f"Expected queries to have shape (nq, d), got {query_matrix.shape!r}."
+        raise ValueError(msg)
+
     centroids = np.asarray(batch.column(COL_CENTROID).to_pylist(), dtype=np.float32)
     radii = np.asarray(batch.column(COL_RADIUS).to_pylist(), dtype=np.float32)
-    lower_bounds = np.asarray(
-        [
-            metric.lower_bound(query, centroid, float(radius))
-            for centroid, radius in zip(centroids, radii, strict=True)
-        ],
-        dtype=np.float32,
+    lower_bounds = _lower_bounds(
+        query_matrix,
+        centroids,
+        radii,
+        metric_type=MetricType(metric_type),
     )
+    min_lower_bounds = np.asarray(np.min(lower_bounds, axis=1), dtype=np.float32)
 
     return pa.Table.from_arrays(
         [
@@ -97,10 +110,37 @@ def _add_lower_bounds(
             batch.column(COL_COUNT),
             batch.column(COL_CENTROID),
             batch.column(COL_RADIUS),
-            pa.array(lower_bounds.tolist(), type=pa.float32()),
+            pa.array(lower_bounds.tolist(), type=pa.list_(pa.float32())),
+            pa.array(min_lower_bounds.tolist(), type=pa.float32()),
         ],
         schema=LOWER_BOUND_SCHEMA,
     )
+
+
+def _lower_bounds(
+    queries: Float32Array,
+    centroids: Float32Array,
+    radii: Float32Array,
+    *,
+    metric_type: MetricType,
+) -> Float32Array:
+    if metric_type == MetricType.EUCLIDEAN:
+        deltas = np.asarray(
+            centroids[:, None, :] - queries[None, :, :],
+            dtype=np.float32,
+        )
+        centroid_distances = np.linalg.norm(deltas, axis=2)
+        return np.asarray(
+            np.square(np.maximum(0.0, centroid_distances - radii[:, None])),
+            dtype=np.float32,
+        )
+
+    metric = make_metric(metric_type)
+    distances = np.asarray(metric.pairwise(centroids, queries), dtype=np.float32).T
+    if distances.ndim != 2:
+        msg = f"Expected pairwise distances to have shape (n_rows, nq), got {distances.shape!r}."
+        raise ValueError(msg)
+    return np.asarray(np.maximum(0.0, distances - radii[:, None]), dtype=np.float32)
 
 
 def _normalize(vectors: Float32Array) -> Float32Array:

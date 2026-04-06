@@ -61,5 +61,5 @@ def zarr_manifest(tmp_path: Path) -> tuple[str, str, np.ndarray]:
     table = pa.Table.from_pylist(rows, schema=MANIFEST_SCHEMA)
     pq.write_table(table, manifest_path)
 
-    query = rng.standard_normal(embedding_dim).astype(np.float32)
+    query = rng.standard_normal((1, embedding_dim)).astype(np.float32)
     return store_path, manifest_path, query

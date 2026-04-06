@@ -13,9 +13,11 @@ COL_STOP: Final = "stop"
 COL_COUNT: Final = "count"
 COL_CENTROID: Final = "centroid"
 COL_RADIUS: Final = "radius"
-COL_LOWER_BOUND: Final = "lower_bound"
+COL_LOWER_BOUNDS: Final = "lower_bounds"
+COL_MIN_LOWER_BOUND: Final = "min_lower_bound"
 
 # Result column names
+COL_QUERY_ID: Final = "query_id"
 COL_CHUNK_ID: Final = "chunk_id"
 COL_OFFSET: Final = "offset"
 COL_DISTANCE: Final = "distance"
@@ -47,11 +49,13 @@ class ChunkRecord(ChunkRef):
 
 
 class LowerBoundRow(ChunkRecord):
-    lower_bound: float
+    lower_bounds: Float32Array
+    min_lower_bound: float
 
 
 @dataclass(frozen=True)
 class SearchResults:
+    query_ids: list[int]
     chunks: list[ChunkRef]
     offsets: list[int]
     distances: list[float]
@@ -59,6 +63,7 @@ class SearchResults:
     def to_rows(self) -> list[dict[str, object]]:
         return [
             {
+                COL_QUERY_ID: query_id,
                 COL_CHUNK_ID: f"{chunk[COL_URL]}#"
                 + "/".join(
                     f"{part[COL_DIM]}={part[COL_START]}:{part[COL_STOP]}"
@@ -69,5 +74,10 @@ class SearchResults:
                 COL_OFFSET: offset,
                 COL_DISTANCE: distance,
             }
-            for chunk, offset, distance in zip(self.chunks, self.offsets, self.distances)
+            for query_id, chunk, offset, distance in zip(
+                self.query_ids,
+                self.chunks,
+                self.offsets,
+                self.distances,
+            )
         ]

@@ -33,9 +33,10 @@ def knn_zarr_search(
     num_cpus_per_actor: float = 1.0,
     actor_pool_size: int = 4,
 ) -> SearchResults:
+    queries = _as_query_batch(query)
     return _knn_search(
         manifest_path,
-        np.asarray(query, dtype=np.float32),
+        queries,
         k,
         reader_type=ReaderType.ZARR,
         reader_kwargs={
@@ -68,9 +69,10 @@ def knn_cog_search(
     num_cpus_per_actor: float = 1.0,
     actor_pool_size: int = 4,
 ) -> SearchResults:
+    queries = _as_query_batch(query)
     return _knn_search(
         manifest_path,
-        np.asarray(query, dtype=np.float32),
+        queries,
         k,
         reader_type=ReaderType.COG,
         reader_kwargs=open_kwargs or {},
@@ -109,6 +111,7 @@ def _knn_search(
         raise NotImplementedError(msg)
 
     heap_actor = HeapActor.remote(  # type: ignore[attr-defined]
+        nq=query.shape[0],
         k=k,
         metric_type=metric.value,
         backend_type=backend.value,
@@ -123,14 +126,14 @@ def _knn_search(
         )
         .map_batches(
             add_lower_bounds_fn,  # type: ignore[arg-type]
-            fn_kwargs={"query": query, "metric_type": metric.value},
+            fn_kwargs={"queries": query, "metric_type": metric.value},
             batch_format="pyarrow",
             udf_modifying_row_count=False,
         )
         .map_batches(
             BlockSearcher,
             fn_constructor_kwargs={
-                "query": query,
+                "queries": query,
                 "k": k,
                 "metric_type": metric.value,
                 "reader_type": reader_type.value,
@@ -217,3 +220,11 @@ def build_manifest_from_cogs(
     del cog_urls, output_path, open_kwargs, n_blocks
     msg = "COG manifest generation is not implemented yet."
     raise NotImplementedError(msg)
+
+
+def _as_query_batch(query: np.ndarray) -> Float32Array:
+    queries = np.asarray(query, dtype=np.float32)
+    if queries.ndim != 2:
+        msg = f"Expected query to have shape (nq, d), got {queries.shape!r}."
+        raise ValueError(msg)
+    return queries

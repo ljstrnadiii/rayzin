@@ -16,7 +16,8 @@ from rayzin.types import (
     COL_CENTROID,
     COL_COUNT,
     COL_DIM,
-    COL_LOWER_BOUND,
+    COL_LOWER_BOUNDS,
+    COL_MIN_LOWER_BOUND,
     COL_RADIUS,
     COL_SLICE,
     COL_START,
@@ -37,7 +38,7 @@ class BlockSearcher:
 
     def __init__(
         self,
-        query: Float32Array,
+        queries: Float32Array,
         k: int,
         metric_type: str,
         reader_type: str,
@@ -46,13 +47,17 @@ class BlockSearcher:
         heap_actor: Any,
     ) -> None:
         metric = MetricType(metric_type)
-        self.query = np.asarray(query, dtype=np.float32)
+        self.queries = np.asarray(queries, dtype=np.float32)
+        if self.queries.ndim != 2:
+            msg = f"Expected queries to have shape (nq, d), got {self.queries.shape!r}."
+            raise ValueError(msg)
+        self.nq = self.queries.shape[0]
         self.k = k
         self.reader = make_reader(ReaderType(reader_type), **reader_kwargs)
         self.backend = make_search_backend(SearchBackendType(backend_type), metric)
-        self.heap = self.backend.create_heap(self.k)
+        self.heap = self.backend.create_heap(self.nq, self.k)
         self.heap_actor = heap_actor
-        self.global_tau = float("inf")
+        self.global_tau = np.full(self.nq, float("inf"), dtype=np.float32)
 
     def __call__(self, batch: LowerBoundTable) -> BlockSearchSummaryTable:
         return self._search_batch(batch)
@@ -60,56 +65,90 @@ class BlockSearcher:
     def _search_batch(self, batch: LowerBoundTable) -> BlockSearchSummaryTable:
         self._refresh_global_tau()
         rows = _manifest_rows(batch)
-        rows.sort(key=lambda row: row[COL_LOWER_BOUND])
+        rows.sort(key=lambda row: row[COL_MIN_LOWER_BOUND])
+        added_query_ids: list[int] = []
         added_chunks: list[ChunkRef] = []
         added_offsets: list[int] = []
         added_distances: list[float] = []
         rows_searched = 0
+        query_evaluations = 0
 
         for row in rows:
-            if row[COL_LOWER_BOUND] >= min(self.heap.tau, self.global_tau):
+            row_lower_bounds = row[COL_LOWER_BOUNDS]
+            if len(row_lower_bounds) != self.nq:
+                msg = (
+                    "Expected one lower bound per query, got "
+                    f"{len(row_lower_bounds)} bounds for {self.nq} queries."
+                )
+                raise ValueError(msg)
+
+            effective_tau = np.minimum(self.heap.tau, self.global_tau)
+            if row[COL_MIN_LOWER_BOUND] >= float(np.max(effective_tau)):
                 break
 
+            active_mask = np.asarray(row_lower_bounds < effective_tau, dtype=bool)
+            if not np.any(active_mask):
+                continue
+
             rows_searched += 1
+            active_query_ids = np.asarray(np.flatnonzero(active_mask), dtype=np.int64)
+            query_evaluations += int(len(active_query_ids))
             chunk = _chunk_record(row)
             chunk_ref = _chunk_ref(chunk)
             vectors, _shape = self.reader.read(chunk)
-            distances, local_indices = self.backend.search(vectors, self.query, self.k)
-            new_offsets, new_distances = self.heap.add(distances, chunk_ref, local_indices)
-            if len(new_offsets) == 0:
+            distances, local_indices = self.backend.search(
+                vectors,
+                self.queries[active_mask],
+                self.k,
+            )
+            new_results = self.heap.add_result_subset(
+                active_query_ids,
+                distances,
+                chunk_ref,
+                local_indices,
+            )
+            if not new_results.query_ids:
                 continue
 
-            added_chunks.extend([chunk_ref] * len(new_offsets))
-            added_offsets.extend(int(offset) for offset in new_offsets.tolist())
-            added_distances.extend(float(distance) for distance in new_distances.tolist())
+            added_query_ids.extend(new_results.query_ids)
+            added_chunks.extend(new_results.chunks)
+            added_offsets.extend(new_results.offsets)
+            added_distances.extend(new_results.distances)
 
         if added_offsets:
-            merged_tau = float(
+            merged_tau = np.asarray(
                 ray.get(
                     self.heap_actor.add_results.remote(
                         SearchResults(
+                            query_ids=added_query_ids,
                             chunks=added_chunks,
                             offsets=added_offsets,
                             distances=added_distances,
                         )
                     )
-                )
+                ),
+                dtype=np.float32,
             )
-            self.global_tau = min(self.global_tau, merged_tau)
+            if merged_tau.shape != (self.nq,):
+                msg = f"Expected global tau to have shape ({self.nq},), got {merged_tau.shape!r}."
+                raise ValueError(msg)
+            self.global_tau = np.minimum(self.global_tau, merged_tau)
         return pa.Table.from_pydict(
             {
                 "rows_seen": [len(rows)],
                 "rows_searched": [rows_searched],
+                "query_evaluations": [query_evaluations],
                 "results_added": [len(added_offsets)],
             },
             schema=BLOCK_SEARCH_SUMMARY_SCHEMA,
         )
 
     def _refresh_global_tau(self) -> None:
-        self.global_tau = min(
-            self.global_tau,
-            float(ray.get(self.heap_actor.tau.remote())),
-        )
+        remote_tau = np.asarray(ray.get(self.heap_actor.tau.remote()), dtype=np.float32)
+        if remote_tau.shape != (self.nq,):
+            msg = f"Expected global tau to have shape ({self.nq},), got {remote_tau.shape!r}."
+            raise ValueError(msg)
+        self.global_tau = np.minimum(self.global_tau, remote_tau)
 
 
 def _manifest_rows(batch: LowerBoundTable) -> list[LowerBoundRow]:
@@ -118,7 +157,8 @@ def _manifest_rows(batch: LowerBoundTable) -> list[LowerBoundRow]:
     counts = batch.column(COL_COUNT).to_pylist()
     centroids = batch.column(COL_CENTROID).to_pylist()
     radii = batch.column(COL_RADIUS).to_pylist()
-    lower_bounds = batch.column(COL_LOWER_BOUND).to_pylist()
+    lower_bounds = batch.column(COL_LOWER_BOUNDS).to_pylist()
+    min_lower_bounds = batch.column(COL_MIN_LOWER_BOUND).to_pylist()
 
     return [
         LowerBoundRow(
@@ -127,7 +167,8 @@ def _manifest_rows(batch: LowerBoundTable) -> list[LowerBoundRow]:
             count=int(counts[i]),
             centroid=np.asarray(centroids[i], dtype=np.float32),
             radius=float(radii[i]),
-            lower_bound=float(lower_bounds[i]),
+            lower_bounds=np.asarray(lower_bounds[i], dtype=np.float32),
+            min_lower_bound=float(min_lower_bounds[i]),
         )
         for i in range(batch.num_rows)
     ]
