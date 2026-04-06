@@ -1,0 +1,28 @@
+__pycache__/
+*.py[cod]
+*.egg-info/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.venv/
+dist/
+.coverage
+.DS_Store
+
+# data artifacts
+*.zarr/
+*.parquet
+*.zstd
+
+# model weights
+*.pth
+*.pt
+*.ckpt
+*.onnx
+
+# IDE
+.vscode/
+.idea/
+
+# pixi
+.pixi/

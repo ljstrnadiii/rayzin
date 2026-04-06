@@ -1,0 +1,29 @@
+repos:
+  - repo: https://github.com/astral-sh/ruff-pre-commit
+    rev: v0.4.0
+    hooks:
+      - id: ruff
+        args: [--fix]
+      - id: ruff-format
+
+  - repo: https://github.com/pre-commit/pre-commit-hooks
+    rev: v4.6.0
+    hooks:
+      - id: check-yaml
+      - id: end-of-file-fixer
+      - id: trailing-whitespace
+
+  - repo: local
+    hooks:
+      - id: mypy
+        name: mypy
+        language: system
+        entry: pixi run -e dev mypy src/rayzin tests
+        pass_filenames: false
+
+      - id: pixi-lock
+        name: pixi-lock
+        language: system
+        entry: pixi install --locked
+        pass_filenames: false
+        files: pyproject.toml
