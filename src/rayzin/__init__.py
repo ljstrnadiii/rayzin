@@ -1,50 +1,26 @@
-from typing import Any
+__version__ = "0.1.0"
 
-from rayzin.enums import MetricType, ReaderType, SearchBackendType
-from rayzin.manifest import MANIFEST_SCHEMA, filter_manifest
-from rayzin.metrics import COSINE, EUCLIDEAN, CosineMetric, EuclideanMetric, Metric
+from rayzin.enums import MetricType, SearchBackendType
 from rayzin.pipeline import (
     build_manifest,
+    build_manifest_from_cogs,
     build_manifest_from_zarr,
+    knn_cog_search,
     knn_zarr_search,
 )
-from rayzin.readers import VectorReader, ZarrVectorReader
-from rayzin.search import BlockSearcher, SearchBackend, make_search_backend
+from rayzin.types import SearchResults
 
 __all__ = [
-    # pipeline — search
+    "__version__",
+    # pipeline
     "knn_zarr_search",
+    "knn_cog_search",
     # pipeline — manifest build
     "build_manifest",
     "build_manifest_from_zarr",
-    # enums
+    "build_manifest_from_cogs",
+    # pipeline API types
     "MetricType",
-    "ReaderType",
     "SearchBackendType",
-    # manifest
-    "MANIFEST_SCHEMA",
-    "filter_manifest",
-    # metrics
-    "Metric",
-    "EuclideanMetric",
-    "CosineMetric",
-    "EUCLIDEAN",
-    "COSINE",
-    # readers
-    "VectorReader",
-    "ZarrVectorReader",
-    # search
-    "SearchBackend",
-    "make_search_backend",
-    "NumpySearchBackend",
-    "FaissSearchBackend",
-    "BlockSearcher",
+    "SearchResults",
 ]
-
-
-def __getattr__(name: str) -> Any:
-    if name in {"NumpySearchBackend", "FaissSearchBackend"}:
-        from rayzin.search import __getattr__ as search_getattr
-
-        return search_getattr(name)
-    raise AttributeError(name)

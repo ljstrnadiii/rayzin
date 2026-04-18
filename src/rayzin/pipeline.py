@@ -217,6 +217,10 @@ def build_manifest_from_cogs(
     open_kwargs: dict[str, Any] | None = None,
     n_blocks: int = 256,
 ) -> None:
+    # TODO: building a manifest for COGs will require scanning all COGs and we should store the
+    # bounds per tile in the COG potentially. Or have an expanding index where we index all the
+    # individual cogs but expand their tiles at task time...
+    # TODO: We should probably support stac-geoparquet directly as well.
     del cog_urls, output_path, open_kwargs, n_blocks
     msg = "COG manifest generation is not implemented yet."
     raise NotImplementedError(msg)

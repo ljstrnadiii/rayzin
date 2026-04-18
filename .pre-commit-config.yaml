@@ -18,7 +18,7 @@ repos:
       - id: mypy
         name: mypy
         language: system
-        entry: pixi run -e dev mypy src/rayzin tests
+        entry: pixi run -e dev mypy --cache-dir=/tmp/rayzin-mypy-cache src/rayzin tests
         pass_filenames: false
 
       - id: pixi-lock
