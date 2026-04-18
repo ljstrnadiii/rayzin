@@ -3289,8 +3289,8 @@ packages:
   requires_python: '>=3.10'
 - pypi: ./
   name: rayzin
-  version: 0.1.0
-  sha256: d495d7fea04c16c4cae260c46fa74530c8db1067b5f6172ee763522622cdb7ae
+  version: 0.0.1
+  sha256: e63b306634b857cc2e90bde816c73d2ba3b46e89e60db0743e58537e72bab8fc
   requires_dist:
   - ray[data]>=2.30.0
   - zarr>=3.0.0

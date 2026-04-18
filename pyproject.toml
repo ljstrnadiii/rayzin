@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "rayzin"
-version = "0.1.0"
+version = "0.0.1"
 description = "Exact KNN search over massive Zarr/COG datasets using Ray Data"
 readme = "README.md"
 authors = [{ name = "rayzin contributors" }]
