@@ -35,6 +35,10 @@ def filter_manifest(
 
 
 class ChunkIntersectsAOI:
+    # TODO: we can get away with opening tha zarr store once since we can extract the geotransform
+    # and analytically check for intersection given a chunks key.
+    # TODO: this should probably be renamed to something zarr specific and we should probable
+    # support cog by forcing manifest to be geoparquet and adding geometry up front per cog tile.
     def __init__(
         self,
         aoi: BaseGeometry,
