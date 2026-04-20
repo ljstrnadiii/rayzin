@@ -63,10 +63,6 @@ class CosineMetric:
         return max(0.0, self.distance(query, centroid) - radius)
 
 
-EUCLIDEAN = EuclideanMetric()
-COSINE = CosineMetric()
-
-
 def make_metric(metric_type: MetricType) -> Metric:
     if metric_type == MetricType.EUCLIDEAN:
         return EuclideanMetric()
@@ -76,14 +72,6 @@ def make_metric(metric_type: MetricType) -> Metric:
 
 
 def add_lower_bounds_fn(
-    batch: ManifestTable,
-    queries: Float32Array,
-    metric_type: str,
-) -> LowerBoundTable:
-    return _add_lower_bounds(batch, queries=queries, metric_type=metric_type)
-
-
-def _add_lower_bounds(
     batch: ManifestTable,
     queries: Float32Array,
     metric_type: str,
