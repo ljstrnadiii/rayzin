@@ -6,9 +6,9 @@ import numpy as np
 import pyarrow as pa  # type: ignore[import-untyped]
 import zarr
 
-from rayzin.manifest.schema import CHUNK_SCHEMA, MANIFEST_SCHEMA, ChunkTable, ManifestTable
 from rayzin.readers.protocol import VectorReader
 from rayzin.readers.zarr_layout import index_axis_names, index_axis_positions
+from rayzin.schema import CHUNK_SCHEMA, MANIFEST_SCHEMA, ChunkTable, ManifestTable
 from rayzin.types import (
     COL_DIM,
     COL_SLICE,

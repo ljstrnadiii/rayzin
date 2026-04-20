@@ -3,7 +3,7 @@ import pyarrow as pa  # type: ignore[import-untyped]
 import pytest
 import ray
 
-from rayzin.manifest.schema import LOWER_BOUND_SCHEMA
+from rayzin.schema import LOWER_BOUND_SCHEMA
 from rayzin.search.backends.numpy import NumpyResultHeap
 from rayzin.search.block_searcher import BlockSearcher
 from rayzin.types import ChunkRecord, ChunkRef, SearchResults

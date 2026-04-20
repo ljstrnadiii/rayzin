@@ -8,8 +8,8 @@ import zarr
 from ray.data.expressions import col
 
 from rayzin.enums import MetricType, SearchBackendType
-from rayzin.manifest.schema import MANIFEST_SCHEMA
 from rayzin.pipeline import build_manifest_from_zarr, knn_zarr_search
+from rayzin.schema import MANIFEST_SCHEMA
 from rayzin.types import (
     COL_CHUNK_ID,
     COL_DISTANCE,

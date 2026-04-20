@@ -8,7 +8,7 @@ import pytest
 import ray
 import zarr
 
-from rayzin.manifest.schema import MANIFEST_SCHEMA
+from rayzin.schema import MANIFEST_SCHEMA
 
 
 @pytest.fixture(scope="session")

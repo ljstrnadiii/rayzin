@@ -4,7 +4,7 @@ import numpy as np
 import pyarrow as pa  # type: ignore[import-untyped]
 
 from rayzin.enums import MetricType
-from rayzin.manifest.schema import LOWER_BOUND_SCHEMA, LowerBoundTable, ManifestTable
+from rayzin.schema import LOWER_BOUND_SCHEMA, LowerBoundTable, ManifestTable
 from rayzin.types import (
     COL_CENTROID,
     COL_COUNT,

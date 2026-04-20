@@ -9,9 +9,9 @@ from shapely.geometry.base import BaseGeometry  # type: ignore[import-untyped]
 from rayzin.enums import MetricType, ReaderType, SearchBackendType
 from rayzin.manifest.build import build_zarr_chunk_table, compute_chunk_summary_arrow
 from rayzin.manifest.filtering import filter_manifest
-from rayzin.manifest.schema import MANIFEST_SCHEMA
 from rayzin.metrics import add_lower_bounds_fn
 from rayzin.readers.zarr_reader import ZarrVectorReader
+from rayzin.schema import MANIFEST_SCHEMA
 from rayzin.search.block_searcher import BlockSearcher
 from rayzin.search.heap_actor import HeapActor
 from rayzin.types import Float32Array, SearchResults

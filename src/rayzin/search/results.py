@@ -1,6 +1,6 @@
 import pyarrow as pa  # type: ignore[import-untyped]
 
-from rayzin.manifest.schema import SEARCH_RESULT_SCHEMA, SearchResultTable
+from rayzin.schema import SEARCH_RESULT_SCHEMA, SearchResultTable
 from rayzin.types import (
     COL_CHUNK_ID,
     COL_DIM,

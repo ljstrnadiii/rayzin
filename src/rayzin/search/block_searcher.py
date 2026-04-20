@@ -5,12 +5,8 @@ import pyarrow as pa  # type: ignore[import-untyped]
 import ray
 
 from rayzin.enums import MetricType, ReaderType, SearchBackendType
-from rayzin.manifest.schema import (
-    BLOCK_SEARCH_SUMMARY_SCHEMA,
-    BlockSearchSummaryTable,
-    LowerBoundTable,
-)
 from rayzin.readers import make_reader
+from rayzin.schema import BLOCK_SEARCH_SUMMARY_SCHEMA, BlockSearchSummaryTable, LowerBoundTable
 from rayzin.search.backends import make_search_backend
 from rayzin.types import (
     COL_CENTROID,

@@ -3,8 +3,8 @@ import numpy as np
 import pyarrow as pa  # type: ignore[import-untyped]
 import pytest
 
-from rayzin.manifest.schema import MANIFEST_SCHEMA
 from rayzin.metrics import CosineMetric, EuclideanMetric, add_lower_bounds_fn
+from rayzin.schema import MANIFEST_SCHEMA
 from rayzin.types import COL_LOWER_BOUNDS, COL_MIN_LOWER_BOUND
 
 

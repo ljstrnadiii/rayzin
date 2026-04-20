@@ -5,8 +5,8 @@ import pyarrow.parquet as pq  # type: ignore[import-untyped]
 import pytest
 import zarr
 
-from rayzin.manifest.schema import MANIFEST_SCHEMA
 from rayzin.pipeline import build_manifest_from_zarr
+from rayzin.schema import MANIFEST_SCHEMA
 
 
 def test_build_manifest_from_zarr_writes_chunk_summaries(
