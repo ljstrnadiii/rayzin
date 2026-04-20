@@ -1,6 +1,7 @@
 __version__ = "0.0.1"
 
 from rayzin.enums import MetricType, SearchBackendType
+from rayzin.manifest import selector_from_aoi
 from rayzin.pipeline import (
     build_manifest,
     build_manifest_from_cogs,
@@ -19,6 +20,7 @@ __all__ = [
     "build_manifest",
     "build_manifest_from_zarr",
     "build_manifest_from_cogs",
+    "selector_from_aoi",
     # pipeline API types
     "MetricType",
     "SearchBackendType",

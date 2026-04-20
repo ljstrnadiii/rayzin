@@ -7,8 +7,9 @@ import pyarrow as pa  # type: ignore[import-untyped]
 import zarr
 
 from rayzin.readers.protocol import VectorReader
-from rayzin.readers.zarr_layout import index_axis_names, index_axis_positions
+from rayzin.readers.zarr_layout import index_axis_names
 from rayzin.schema import CHUNK_SCHEMA, MANIFEST_SCHEMA, ChunkTable, ManifestTable
+from rayzin.selectors import Selector, resolve_selector_intervals
 from rayzin.types import (
     COL_DIM,
     COL_SLICE,
@@ -28,6 +29,7 @@ def build_zarr_chunk_table(
     array_name: str,
     store_kwargs: dict[str, Any],
     embedding_dim_name: str = "embedding",
+    selectors: Selector | None = None,
 ) -> ChunkTable:
     return pa.Table.from_pylist(
         list(
@@ -36,6 +38,7 @@ def build_zarr_chunk_table(
                 array_name=array_name,
                 store_kwargs=store_kwargs,
                 embedding_dim_name=embedding_dim_name,
+                selectors=selectors,
             )
         ),
         schema=CHUNK_SCHEMA,
@@ -48,6 +51,7 @@ def iter_zarr_chunk_slices(
     array_name: str,
     store_kwargs: dict[str, Any],
     embedding_dim_name: str,
+    selectors: Selector | None = None,
 ) -> Iterator[ChunkRef]:
     group = zarr.open_group(
         store=store_url,
@@ -64,26 +68,26 @@ def iter_zarr_chunk_slices(
         )
         raise ValueError(msg)
 
-    axis_positions = index_axis_positions(array, embedding_dim_name=embedding_dim_name)
     axis_names = index_axis_names(array, embedding_dim_name=embedding_dim_name)
-    index_shape = tuple(array.shape[index] for index in axis_positions)
-    index_chunks = tuple(array.chunks[index] for index in axis_positions)
-    start_ranges = [range(0, size, chunk) for size, chunk in zip(index_shape, index_chunks)]
+    dim_intervals = resolve_selector_intervals(
+        group,
+        array,
+        selectors=selectors,
+        embedding_dim_name=embedding_dim_name,
+    )
 
-    for starts in product(*start_ranges):
+    for intervals in product(*(dim_intervals[axis_name] for axis_name in axis_names)):
         yield ChunkRef(
             url=store_url,
             slice=[
                 DimSlice(
                     dim=axis_name,
                     start=start,
-                    stop=min(start + chunk, size),
+                    stop=stop,
                 )
-                for axis_name, start, chunk, size in zip(
+                for axis_name, (start, stop) in zip(
                     axis_names,
-                    starts,
-                    index_chunks,
-                    index_shape,
+                    intervals,
                 )
             ],
         )

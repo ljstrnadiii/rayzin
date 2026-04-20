@@ -16,6 +16,7 @@ dependencies = [
     "numpy>=1.26.0",
     "obstore>=0.6",
     "shapely>=2.0.0",
+    "pyproj>=3.6.0",
 ]
 
 [tool.hatch.build.targets.wheel]
@@ -38,6 +39,7 @@ pyarrow = ">=16.0.0"
 numpy = ">=1.26.0"
 obstore = ">=0.6"
 shapely = ">=2.0.0"
+pyproj = ">=3.6.0"
 
 # ---------------------------------------------------------------------------
 # Features

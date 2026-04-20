@@ -14,6 +14,7 @@ from rayzin.readers.zarr_reader import ZarrVectorReader
 from rayzin.schema import MANIFEST_SCHEMA
 from rayzin.search.block_searcher import BlockSearcher
 from rayzin.search.heap_actor import HeapActor
+from rayzin.selectors import Selector
 from rayzin.types import Float32Array, SearchResults
 
 
@@ -159,8 +160,12 @@ def build_manifest(
     *,
     n_blocks: int = 256,
     embedding_dim_name: str = "embedding",
+    selectors: Selector | None = None,
 ) -> None:
     if isinstance(source, list):
+        if selectors is not None:
+            msg = "Selectors are only supported for Zarr manifest generation."
+            raise NotImplementedError(msg)
         build_manifest_from_cogs(source, output_path, n_blocks=n_blocks)
     else:
         build_manifest_from_zarr(
@@ -168,6 +173,7 @@ def build_manifest(
             output_path,
             n_blocks=n_blocks,
             embedding_dim_name=embedding_dim_name,
+            selectors=selectors,
         )
 
 
@@ -178,6 +184,7 @@ def build_manifest_from_zarr(
     array_name: str = "embeddings",
     embedding_dim_name: str = "embedding",
     store_kwargs: dict[str, Any] | None = None,
+    selectors: Selector | None = None,
     n_blocks: int = 256,
 ) -> None:
     reader = ZarrVectorReader(
@@ -190,6 +197,7 @@ def build_manifest_from_zarr(
         array_name=array_name,
         store_kwargs=store_kwargs or {},
         embedding_dim_name=embedding_dim_name,
+        selectors=selectors,
     )
     if chunk_table.num_rows == 0:
         ray.data.from_arrow(MANIFEST_SCHEMA.empty_table()).write_parquet(
