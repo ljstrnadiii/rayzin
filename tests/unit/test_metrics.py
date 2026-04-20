@@ -77,6 +77,44 @@ def test_add_lower_bounds_matches_faiss_l2_pruning() -> None:
     np.testing.assert_allclose(min_lower_bounds, expected_lower_bounds.min(axis=1), atol=1e-6)
 
 
+def test_euclidean_lower_bounds_matches_scalar_lower_bound(
+    euclidean_metric: EuclideanMetric,
+) -> None:
+    centroids = np.array([[0.0, 0.0], [3.0, 4.0]], dtype=np.float32)
+    radii = np.array([1.0, 0.5], dtype=np.float32)
+    queries = np.array([[0.0, 0.0], [6.0, 8.0]], dtype=np.float32)
+
+    lower_bounds = euclidean_metric.lower_bounds(queries, centroids, radii)
+    expected = np.asarray(
+        [
+            [euclidean_metric.lower_bound(query, centroid, float(radius)) for query in queries]
+            for centroid, radius in zip(centroids, radii)
+        ],
+        dtype=np.float32,
+    )
+
+    np.testing.assert_allclose(lower_bounds, expected, atol=1e-6)
+
+
+def test_cosine_lower_bounds_matches_scalar_lower_bound(
+    cosine_metric: CosineMetric,
+) -> None:
+    centroids = np.array([[1.0, 0.0], [1.0, 1.0]], dtype=np.float32)
+    radii = np.array([0.1, 0.2], dtype=np.float32)
+    queries = np.array([[1.0, 0.0], [0.0, 1.0]], dtype=np.float32)
+
+    lower_bounds = cosine_metric.lower_bounds(queries, centroids, radii)
+    expected = np.asarray(
+        [
+            [cosine_metric.lower_bound(query, centroid, float(radius)) for query in queries]
+            for centroid, radius in zip(centroids, radii)
+        ],
+        dtype=np.float32,
+    )
+
+    np.testing.assert_allclose(lower_bounds, expected, atol=1e-6)
+
+
 def test_euclidean_pairwise_matches_faiss_l2(euclidean_metric: EuclideanMetric) -> None:
     vectors = np.array([[0.0, 0.0], [3.0, 4.0], [1.0, 1.0]], dtype=np.float32)
     query = np.array([0.0, 0.0], dtype=np.float32)
