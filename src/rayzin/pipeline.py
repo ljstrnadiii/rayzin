@@ -1,20 +1,22 @@
 from typing import Any
 
 import numpy as np
+import pyarrow as pa  # type: ignore[import-untyped]
 import ray.data
 from ray.data import ActorPoolStrategy
-from ray.data.expressions import Expr
+from ray.data.expressions import Expr, col
 from shapely.geometry.base import BaseGeometry  # type: ignore[import-untyped]
 
 from rayzin.enums import MetricType, ReaderType, SearchBackendType
 from rayzin.manifest.build import build_zarr_chunk_table, compute_chunk_summary_arrow
+from rayzin.manifest.cog import summarize_cog_blocks
 from rayzin.manifest.filtering import filter_manifest
 from rayzin.manifest.schema import MANIFEST_SCHEMA
 from rayzin.metrics import add_lower_bounds_fn
 from rayzin.readers.zarr_reader import ZarrVectorReader
 from rayzin.search.block_searcher import BlockSearcher
 from rayzin.search.heap_actor import HeapActor
-from rayzin.types import Float32Array, SearchResults
+from rayzin.types import COL_COUNT, COL_URL, Float32Array, SearchResults
 
 
 def knn_zarr_search(
@@ -60,30 +62,44 @@ def knn_cog_search(
     query: np.ndarray,
     k: int,
     *,
-    open_kwargs: dict[str, Any] | None = None,
+    store_kwargs: dict[str, Any] | None = None,
+    normalize: bool = True,
     metric: MetricType = MetricType.EUCLIDEAN,
     backend: SearchBackendType = SearchBackendType.NUMPY,
     filter_expr: Expr | None = None,
     aoi: BaseGeometry | None = None,
     batch_size: int | None = None,
     num_cpus_per_actor: float = 1.0,
+    num_gpus_per_actor: float = 0.0,
     actor_pool_size: int = 4,
+    prefetch: int = 8,
 ) -> SearchResults:
+    """Exact top-``k`` over the COG blocks of a manifest built by ``build_manifest_from_cogs``.
+
+    ``filter_expr`` and ``aoi`` prune blocks on their metadata and footprints before any read;
+    surviving blocks are read ``prefetch`` at a time per actor. ``normalize`` must match the
+    manifest's. With ``SearchBackendType.FAISS_GPU``, give each actor a GPU.
+    """
     queries = _as_query_batch(query)
+    if normalize:
+        norms = np.linalg.norm(queries, axis=1, keepdims=True)
+        queries = (queries / np.maximum(norms, 1e-12)).astype(np.float32)
     return _knn_search(
         manifest_path,
         queries,
         k,
         reader_type=ReaderType.COG,
-        reader_kwargs=open_kwargs or {},
+        reader_kwargs={"normalize": normalize, "store_kwargs": store_kwargs or {}},
         metric=metric,
         backend=backend,
         filter_expr=filter_expr,
         aoi=aoi,
-        store_kwargs=open_kwargs or {},
+        store_kwargs=store_kwargs or {},
         batch_size=batch_size,
         num_cpus_per_actor=num_cpus_per_actor,
+        num_gpus_per_actor=num_gpus_per_actor,
         actor_pool_size=actor_pool_size,
+        prefetch=prefetch,
     )
 
 
@@ -102,10 +118,9 @@ def _knn_search(
     batch_size: int | None,
     num_cpus_per_actor: float,
     actor_pool_size: int,
+    num_gpus_per_actor: float = 0.0,
+    prefetch: int = 1,
 ) -> SearchResults:
-    if reader_type != ReaderType.ZARR:
-        msg = "COG search is not implemented yet."
-        raise NotImplementedError(msg)
     if metric != MetricType.EUCLIDEAN:
         msg = "Search pruning currently supports only the euclidean metric."
         raise NotImplementedError(msg)
@@ -119,7 +134,7 @@ def _knn_search(
 
     (
         filter_manifest(
-            ray.data.read_parquet(manifest_path),
+            ray.data.read_parquet(manifest_path).filter(expr=col(COL_COUNT) > 0),
             filter_expr=filter_expr,
             aoi=aoi,
             store_kwargs=store_kwargs,
@@ -140,12 +155,14 @@ def _knn_search(
                 "reader_kwargs": reader_kwargs,
                 "backend_type": backend.value,
                 "heap_actor": heap_actor,
+                "prefetch": prefetch,
             },
             batch_size=batch_size,
             batch_format="pyarrow",
             udf_modifying_row_count=True,
             compute=ActorPoolStrategy(min_size=1, max_size=actor_pool_size),
             num_cpus=num_cpus_per_actor,
+            num_gpus=num_gpus_per_actor,
         )
         .materialize()
     )
@@ -161,7 +178,7 @@ def build_manifest(
     embedding_dim_name: str = "embedding",
 ) -> None:
     if isinstance(source, list):
-        build_manifest_from_cogs(source, output_path, n_blocks=n_blocks)
+        build_manifest_from_cogs(source, output_path)
     else:
         build_manifest_from_zarr(
             source,
@@ -214,16 +231,56 @@ def build_manifest_from_cogs(
     cog_urls: list[str],
     output_path: str,
     *,
-    open_kwargs: dict[str, Any] | None = None,
-    n_blocks: int = 256,
-) -> None:
-    # TODO: building a manifest for COGs will require scanning all COGs and we should store the
-    # bounds per tile in the COG potentially. Or have an expanding index where we index all the
-    # individual cogs but expand their tiles at task time...
-    # TODO: We should probably support stac-geoparquet directly as well.
-    del cog_urls, output_path, open_kwargs, n_blocks
-    msg = "COG manifest generation is not implemented yet."
-    raise NotImplementedError(msg)
+    metadata: dict[str, list[Any]] | None = None,
+    store_kwargs: dict[str, Any] | None = None,
+    normalize: bool = True,
+    files_per_task: int = 8,
+    files_in_flight: int = 4,
+) -> int:
+    """Summarise every block of each COG not yet in the manifest at ``output_path``.
+
+    One row per block: its slice, count, centroid, radius and lon/lat footprint, plus the
+    ``metadata`` columns, one value per URL, e.g. acquisition time, for ``filter_expr``. A URL
+    already in the manifest is skipped and new rows are appended as new parquet files, so a
+    growing collection is only ever scanned once. Returns how many files were added.
+    """
+    urls = list(cog_urls)
+    indexed = manifest_urls(output_path)
+    new = [index for index, url in enumerate(urls) if url not in indexed]
+    if not new:
+        return 0
+    columns = {
+        COL_URL: [urls[index] for index in new],
+        **{name: [values[index] for index in new] for name, values in (metadata or {}).items()},
+    }
+    (
+        ray.data.from_arrow(pa.table(columns), override_num_blocks=-(-len(new) // files_per_task))
+        .map_batches(
+            summarize_cog_blocks,  # type: ignore[arg-type]
+            batch_size=None,
+            batch_format="pyarrow",
+            fn_kwargs={
+                "normalize": normalize,
+                "store_kwargs": store_kwargs or {},
+                "files_in_flight": files_in_flight,
+            },
+            udf_modifying_row_count=True,
+        )
+        .write_parquet(output_path, mode=ray.data.SaveMode.APPEND)
+    )
+    return len(new)
+
+
+def manifest_urls(path: str) -> set[str]:
+    """Every URL a manifest already indexes; empty when there is no manifest yet."""
+    import pyarrow.dataset as ds  # type: ignore[import-untyped]
+    import pyarrow.fs as pafs  # type: ignore[import-untyped]
+
+    filesystem, root = pafs.FileSystem.from_uri(path)
+    if filesystem.get_file_info(root).type == pafs.FileType.NotFound:
+        return set()
+    table = ds.dataset(root, filesystem=filesystem, format="parquet").to_table(columns=[COL_URL])
+    return set(table.column(COL_URL).unique().to_pylist())
 
 
 def _as_query_batch(query: np.ndarray) -> Float32Array:

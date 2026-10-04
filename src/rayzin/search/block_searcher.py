@@ -45,8 +45,10 @@ class BlockSearcher:
         reader_kwargs: dict[str, Any],
         backend_type: str,
         heap_actor: Any,
+        prefetch: int = 1,
     ) -> None:
         metric = MetricType(metric_type)
+        self.prefetch = max(1, prefetch)
         self.queries = np.asarray(queries, dtype=np.float32)
         if self.queries.ndim != 2:
             msg = f"Expected queries to have shape (nq, d), got {self.queries.shape!r}."
@@ -74,28 +76,35 @@ class BlockSearcher:
         query_evaluations = 0
 
         for row in rows:
-            row_lower_bounds = row[COL_LOWER_BOUNDS]
-            if len(row_lower_bounds) != self.nq:
+            if len(row[COL_LOWER_BOUNDS]) != self.nq:
                 msg = (
                     "Expected one lower bound per query, got "
-                    f"{len(row_lower_bounds)} bounds for {self.nq} queries."
+                    f"{len(row[COL_LOWER_BOUNDS])} bounds for {self.nq} queries."
                 )
                 raise ValueError(msg)
 
-            effective_tau = np.minimum(self.heap.tau, self.global_tau)
-            if row[COL_MIN_LOWER_BOUND] >= float(np.max(effective_tau)):
-                break
+        position = 0
+        reads: list[tuple[LowerBoundRow, tuple[Float32Array, tuple[int, ...]]]] = []
+        while True:
+            if not reads:
+                group, position = self._next_group(rows, position)
+                if not group:
+                    break
+                chunks = [_chunk_record(row) for row in group]
+                read_many = getattr(self.reader, "read_many", None)
+                fetched = read_many(chunks) if read_many else [self.reader.read(c) for c in chunks]
+                reads = list(zip(group, fetched, strict=True))
+            row, (vectors, _shape) = reads.pop(0)
 
-            active_mask = np.asarray(row_lower_bounds < effective_tau, dtype=bool)
+            effective_tau = np.minimum(self.heap.tau, self.global_tau)
+            active_mask = np.asarray(row[COL_LOWER_BOUNDS] < effective_tau, dtype=bool)
             if not np.any(active_mask):
                 continue
 
             rows_searched += 1
             active_query_ids = np.asarray(np.flatnonzero(active_mask), dtype=np.int64)
             query_evaluations += int(len(active_query_ids))
-            chunk = _chunk_record(row)
-            chunk_ref = _chunk_ref(chunk)
-            vectors, _shape = self.reader.read(chunk)
+            chunk_ref = _chunk_ref(_chunk_record(row))
             distances, local_indices = self.backend.search(
                 vectors,
                 self.queries[active_mask],
@@ -142,6 +151,21 @@ class BlockSearcher:
             },
             schema=BLOCK_SEARCH_SUMMARY_SCHEMA,
         )
+
+    def _next_group(
+        self, rows: list[LowerBoundRow], position: int
+    ) -> tuple[list[LowerBoundRow], int]:
+        """Up to ``prefetch`` rows from ``position`` that the current bounds cannot rule out."""
+        group: list[LowerBoundRow] = []
+        effective_tau = np.minimum(self.heap.tau, self.global_tau)
+        while position < len(rows) and len(group) < self.prefetch:
+            row = rows[position]
+            if row[COL_MIN_LOWER_BOUND] >= float(np.max(effective_tau)):
+                return group, len(rows)
+            position += 1
+            if np.any(row[COL_LOWER_BOUNDS] < effective_tau):
+                group.append(row)
+        return group, position
 
     def _refresh_global_tau(self) -> None:
         remote_tau = np.asarray(ray.get(self.heap_actor.tau.remote()), dtype=np.float32)

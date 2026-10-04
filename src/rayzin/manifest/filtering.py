@@ -1,5 +1,6 @@
 from typing import Any
 
+import pyarrow as pa  # type: ignore[import-untyped]
 import ray.data
 from ray.data.expressions import Expr
 from shapely.geometry.base import BaseGeometry  # type: ignore[import-untyped]
@@ -11,6 +12,7 @@ from rayzin.manifest.spatial import (
     read_zarr_geotransform,
     validate_aoi_geometry,
 )
+from rayzin.types import COL_GEOMETRY
 
 
 def filter_manifest(
@@ -23,7 +25,14 @@ def filter_manifest(
     filtered = dataset
     if isinstance(filter_expr, Expr):
         filtered = filtered.filter(expr=filter_expr)
-    if aoi is not None:
+    if aoi is not None and COL_GEOMETRY in filtered.schema().names:
+        filtered = filtered.map_batches(
+            rows_intersecting,  # type: ignore[arg-type]
+            batch_format="pyarrow",
+            fn_kwargs={"aoi": validate_aoi_geometry(aoi)},
+            udf_modifying_row_count=True,
+        )
+    elif aoi is not None:
         filtered = filtered.filter(
             ChunkIntersectsAOI,
             fn_constructor_kwargs={
@@ -58,3 +67,11 @@ class ChunkIntersectsAOI:
             )
             self._transform_cache[chunk["url"]] = transform
         return bool(chunk_polygon(chunk, transform).intersects(self._aoi))
+
+
+def rows_intersecting(batch: pa.Table, aoi: BaseGeometry) -> pa.Table:
+    """Keep manifest rows whose stored lon/lat footprint intersects ``aoi``, opening no file."""
+    import shapely  # type: ignore[import-untyped]
+
+    footprints = shapely.from_wkb(batch.column(COL_GEOMETRY).to_numpy(zero_copy_only=False))
+    return batch.filter(pa.array(shapely.intersects(footprints, aoi)))

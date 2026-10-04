@@ -1,6 +1,6 @@
 from typing import Any
 
-import faiss  # type: ignore[import-untyped]
+import faiss
 import numpy as np
 
 from rayzin.enums import MetricType
@@ -244,23 +244,29 @@ class FaissSearchBackend:
         return flat_distances, np.asarray(indices, dtype=np.int64)
 
 
+_GPU_RESOURCES: Any = None
+
+
 def _build_index(
     dimension: int,
     metric_type: MetricType,
     use_gpu: bool,
 ) -> Any:
-    if metric_type == MetricType.EUCLIDEAN:
-        index = faiss.IndexFlatL2(dimension)
-    else:
-        index = faiss.IndexFlatIP(dimension)
+    index: Any = (
+        faiss.IndexFlatL2(dimension)
+        if metric_type == MetricType.EUCLIDEAN
+        else faiss.IndexFlatIP(dimension)
+    )
 
     if not use_gpu:
         return index
     if not hasattr(faiss, "StandardGpuResources"):
         msg = "This FAISS build does not include GPU support."
         raise NotImplementedError(msg)
-    resources = faiss.StandardGpuResources()
-    return faiss.index_cpu_to_gpu(resources, 0, index)
+    global _GPU_RESOURCES
+    if _GPU_RESOURCES is None:
+        _GPU_RESOURCES = faiss.StandardGpuResources()
+    return faiss.index_cpu_to_gpu(_GPU_RESOURCES, 0, index)
 
 
 def _prepare_inputs(

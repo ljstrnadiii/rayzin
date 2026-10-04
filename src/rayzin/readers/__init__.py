@@ -13,8 +13,9 @@ def make_reader(reader_type: "ReaderType", **kwargs: Any) -> VectorReader:
     if reader_type == ReaderType.ZARR:
         return ZarrVectorReader(**kwargs)
     if reader_type == ReaderType.COG:
-        msg = "COG reading is not implemented yet."
-        raise NotImplementedError(msg)
+        from rayzin.readers.cog_reader import CogVectorReader
+
+        return CogVectorReader(**kwargs)
     raise ValueError(reader_type)
 
 

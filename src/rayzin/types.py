@@ -13,6 +13,8 @@ COL_STOP: Final = "stop"
 COL_COUNT: Final = "count"
 COL_CENTROID: Final = "centroid"
 COL_RADIUS: Final = "radius"
+COL_GEOMETRY: Final = "geometry"
+COL_EPSG: Final = "epsg"
 COL_LOWER_BOUNDS: Final = "lower_bounds"
 COL_MIN_LOWER_BOUND: Final = "min_lower_bound"
 
