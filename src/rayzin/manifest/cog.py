@@ -73,7 +73,16 @@ def summarize_cog_blocks(
             pa.array(epsgs, type=pa.int32()),
             *(taken.column(name) for name in extra),
         ],
-        names=[COL_URL, COL_SLICE, COL_COUNT, COL_CENTROID, COL_RADIUS, COL_GEOMETRY, COL_EPSG, *extra],
+        names=[
+            COL_URL,
+            COL_SLICE,
+            COL_COUNT,
+            COL_CENTROID,
+            COL_RADIUS,
+            COL_GEOMETRY,
+            COL_EPSG,
+            *extra,
+        ],
     )
 
 
@@ -82,9 +91,7 @@ def _summary(block: Block) -> tuple[int, np.ndarray, float]:
     if not len(kept):
         return 0, np.zeros(block.vectors.shape[1], np.float32), 0.0
     centroid = kept.mean(axis=0, dtype=np.float32)
-    squared = (
-        np.einsum("ij,ij->i", kept, kept) - 2 * kept @ centroid + float(centroid @ centroid)
-    )
+    squared = np.einsum("ij,ij->i", kept, kept) - 2 * kept @ centroid + float(centroid @ centroid)
     return int(len(kept)), centroid, float(np.sqrt(max(float(squared.max()), 0.0)))
 
 
