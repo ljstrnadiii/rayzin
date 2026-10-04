@@ -73,12 +73,14 @@ def knn_cog_search(
     num_gpus_per_actor: float = 0.0,
     actor_pool_size: int = 4,
     prefetch: int = 8,
+    filesystem: Any = None,
 ) -> SearchResults:
     """Exact top-``k`` over the COG blocks of a manifest built by ``build_manifest_from_cogs``.
 
     ``filter_expr`` and ``aoi`` prune blocks on their metadata and footprints before any read;
     surviving blocks are read ``prefetch`` at a time per actor. ``normalize`` must match the
-    manifest's. With ``SearchBackendType.FAISS_GPU``, give each actor a GPU.
+    manifest's. With ``SearchBackendType.FAISS_GPU``, give each actor a GPU. ``filesystem``, a
+    ``pyarrow.fs.FileSystem``, reads the manifest, with ``manifest_path`` relative to it.
     """
     queries = _as_query_batch(query)
     if normalize:
@@ -100,6 +102,7 @@ def knn_cog_search(
         num_gpus_per_actor=num_gpus_per_actor,
         actor_pool_size=actor_pool_size,
         prefetch=prefetch,
+        filesystem=filesystem,
     )
 
 
@@ -120,6 +123,7 @@ def _knn_search(
     actor_pool_size: int,
     num_gpus_per_actor: float = 0.0,
     prefetch: int = 1,
+    filesystem: Any = None,
 ) -> SearchResults:
     if metric != MetricType.EUCLIDEAN:
         msg = "Search pruning currently supports only the euclidean metric."
@@ -134,7 +138,9 @@ def _knn_search(
 
     (
         filter_manifest(
-            ray.data.read_parquet(manifest_path).filter(expr=col(COL_COUNT) > 0),
+            ray.data.read_parquet(manifest_path, filesystem=filesystem).filter(
+                expr=col(COL_COUNT) > 0
+            ),
             filter_expr=filter_expr,
             aoi=aoi,
             store_kwargs=store_kwargs,
@@ -236,16 +242,18 @@ def build_manifest_from_cogs(
     normalize: bool = True,
     files_per_task: int = 8,
     files_in_flight: int = 4,
+    filesystem: Any = None,
 ) -> int:
     """Summarise every block of each COG not yet in the manifest at ``output_path``.
 
     One row per block: its slice, count, centroid, radius and lon/lat footprint, plus the
     ``metadata`` columns, one value per URL, e.g. acquisition time, for ``filter_expr``. A URL
     already in the manifest is skipped and new rows are appended as new parquet files, so a
-    growing collection is only ever scanned once. Returns how many files were added.
+    growing collection is only ever scanned once. ``filesystem``, a ``pyarrow.fs.FileSystem``,
+    holds the manifest, with ``output_path`` relative to it. Returns how many files were added.
     """
     urls = list(cog_urls)
-    indexed = manifest_urls(output_path)
+    indexed = manifest_urls(output_path, filesystem)
     new = [index for index, url in enumerate(urls) if url not in indexed]
     if not new:
         return 0
@@ -266,17 +274,20 @@ def build_manifest_from_cogs(
             },
             udf_modifying_row_count=True,
         )
-        .write_parquet(output_path, mode=ray.data.SaveMode.APPEND)
+        .write_parquet(output_path, filesystem=filesystem, mode=ray.data.SaveMode.APPEND)
     )
     return len(new)
 
 
-def manifest_urls(path: str) -> set[str]:
+def manifest_urls(path: str, filesystem: Any = None) -> set[str]:
     """Every URL a manifest already indexes; empty when there is no manifest yet."""
     import pyarrow.dataset as ds  # type: ignore[import-untyped]
     import pyarrow.fs as pafs  # type: ignore[import-untyped]
 
-    filesystem, root = pafs.FileSystem.from_uri(path)
+    if filesystem is None:
+        filesystem, root = pafs.FileSystem.from_uri(path)
+    else:
+        root = path
     if filesystem.get_file_info(root).type == pafs.FileType.NotFound:
         return set()
     table = ds.dataset(root, filesystem=filesystem, format="parquet").to_table(columns=[COL_URL])
