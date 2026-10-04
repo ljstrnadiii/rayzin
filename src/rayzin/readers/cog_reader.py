@@ -157,14 +157,16 @@ class CogVectorReader:
                         row,
                         column,
                         layout,
-                        bytes(tile.compressed_bytes),
+                        memoryview(tile.compressed_bytes),
                     )
                     for (row, column), tile in zip(cells, tiles, strict=True)
                 )
             )
         )
 
-    def _decode(self, url: str, row: int, column: int, layout: CogLayout, data: bytes) -> Block:
+    def _decode(
+        self, url: str, row: int, column: int, layout: CogLayout, data: memoryview
+    ) -> Block:
         pixels = decode_block(data, layout)
         y0, y1, x0, x1 = layout.window(row, column)
         cells = pixels[: y1 - y0, : x1 - x0].reshape(-1, layout.bands).astype(np.float32)
@@ -228,13 +230,15 @@ def cog_layout(ifd: Any) -> CogLayout:
     )
 
 
-def decode_block(data: bytes, layout: CogLayout) -> np.ndarray:
+def decode_block(data: memoryview | bytes, layout: CogLayout) -> np.ndarray:
     """Decode one block to ``(block_height, block_width, bands)``."""
     size = layout.block_height * layout.block_width * layout.bands * layout.dtype.itemsize
     if layout.compression == ZSTD:
         import zstandard
 
-        raw = zstandard.ZstdDecompressor().decompress(data, max_output_size=size)
+        raw: memoryview | bytes = zstandard.ZstdDecompressor().decompress(
+            data, max_output_size=size
+        )
     elif layout.compression in DEFLATE:
         raw = zlib.decompress(data)
     elif layout.compression == NO_COMPRESSION:
@@ -331,14 +335,14 @@ class RawBlockStream:
             tiff, layout = await self._reader._open(url)
             row, column = y0 // layout.block_height, x0 // layout.block_width
             [tile] = await tiff.fetch_tiles([(column, row)], 0)
-            data = bytes(tile.compressed_bytes)
+            data = memoryview(tile.compressed_bytes)
         except BaseException as error:
             self._loop.call_soon(self._gate.release)
             self._ready.put((key, None, error))
             return
         self._pool.submit(self._decode, key, layout, row, column, data)
 
-    def _decode(self, key: Any, layout: CogLayout, row: int, column: int, data: bytes) -> None:
+    def _decode(self, key: Any, layout: CogLayout, row: int, column: int, data: memoryview) -> None:
         slot = self._free.get()
         try:
             nbytes = layout.block_height * layout.block_width * layout.bands * layout.dtype.itemsize
@@ -353,8 +357,12 @@ class RawBlockStream:
             self._loop.call_soon_threadsafe(self._gate.release)
 
 
-def decode_block_into(data: bytes, layout: CogLayout, out: np.ndarray) -> None:
-    """Decode one block straight into ``out``, a uint8 buffer of exactly its decoded size."""
+def decode_block_into(data: memoryview | bytes, layout: CogLayout, out: np.ndarray) -> None:
+    """Decode one block straight into ``out``, a uint8 buffer of exactly its decoded size.
+
+    ``data`` is async-tiff's buffer as fetched; copying it into ``bytes`` holds the GIL for tens
+    of milliseconds per block, which stalls the thread feeding the GPU.
+    """
     if layout.compression == ZSTD:
         import zstandard
 
