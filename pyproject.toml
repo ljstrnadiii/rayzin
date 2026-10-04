@@ -22,6 +22,7 @@ dependencies = [
 cog = ["async-tiff>=0.7", "zstandard>=0.22", "pyproj>=3.6"]
 cpu = ["faiss-cpu>=1.8"]
 gpu = ["faiss-gpu>=1.15"]
+torch = ["torch>=2.4"]
 
 [tool.hatch.build.targets.wheel]
 packages = ["src/rayzin"]

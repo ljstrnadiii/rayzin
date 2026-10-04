@@ -1,6 +1,8 @@
 import asyncio
+import queue
+import threading
 import zlib
-from collections.abc import Coroutine, Sequence
+from collections.abc import Callable, Coroutine, Sequence
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
 from typing import Any, TypeVar
@@ -85,6 +87,7 @@ class CogVectorReader:
         decode_threads: int = 8,
     ) -> None:
         self._normalize = normalize
+        self.decode_threads = decode_threads
         self._store_kwargs = store_kwargs or {}
         self._stores: dict[str, Any] = {}
         self._files: dict[str, tuple[Any, CogLayout]] = {}
@@ -255,3 +258,119 @@ def block_slice(layout: CogLayout, row: int, column: int) -> list[dict[str, Any]
 def _origin_of(chunk: ChunkRecord) -> tuple[int, int]:
     bounds = {part[COL_DIM]: part[COL_START] for part in chunk[COL_SLICE]}
     return bounds["y"], bounds["x"]
+
+
+@dataclass(frozen=True)
+class RawBlock:
+    """A block decoded in its stored dtype into a host buffer the consumer hands back."""
+
+    slot: tuple[Any, np.ndarray]
+    layout: CogLayout
+    row: int
+    column: int
+
+    @property
+    def nbytes(self) -> int:
+        layout = self.layout
+        return layout.block_height * layout.block_width * layout.bands * layout.dtype.itemsize
+
+
+class RawBlockStream:
+    """Fetches and decodes COG blocks into reusable host buffers, as many at once as allowed.
+
+    ``in_flight`` bounds blocks fetched but not yet decoded, ``threads`` decode at once, and a
+    decoded block holds its buffer until ``release``, so memory stays bounded. ``allocate``
+    makes a buffer of at least n bytes, e.g. pinned memory, and returns it with a writable
+    uint8 view. Blocks come back in the order they finish.
+    """
+
+    def __init__(
+        self,
+        reader: CogVectorReader,
+        allocate: Callable[[int], tuple[Any, np.ndarray]],
+        *,
+        in_flight: int,
+        threads: int,
+    ) -> None:
+        self._reader = reader
+        self._allocate = allocate
+        self._loop = asyncio.new_event_loop()
+        self._thread = threading.Thread(target=self._loop.run_forever, daemon=True)
+        self._thread.start()
+        self._gate = asyncio.Semaphore(in_flight)
+        self._pool = ThreadPoolExecutor(threads)
+        self._free: queue.Queue[tuple[Any, np.ndarray] | None] = queue.Queue()
+        for _ in range(threads + 2):
+            self._free.put(None)
+        self._ready: queue.Queue[tuple[Any, RawBlock | None, BaseException | None]] = queue.Queue()
+        self.pending = 0
+
+    def submit(self, key: Any, url: str, y0: int, x0: int) -> None:
+        self.pending += 1
+        asyncio.run_coroutine_threadsafe(self._fetch(key, url, y0, x0), self._loop)
+
+    def next(self) -> tuple[Any, RawBlock]:
+        key, block, error = self._ready.get()
+        self.pending -= 1
+        if error is not None:
+            raise error
+        assert block is not None
+        return key, block
+
+    def release(self, block: RawBlock) -> None:
+        self._free.put(block.slot)
+
+    def close(self) -> None:
+        self._loop.call_soon_threadsafe(self._loop.stop)
+        self._thread.join()
+        self._pool.shutdown()
+
+    async def _fetch(self, key: Any, url: str, y0: int, x0: int) -> None:
+        await self._gate.acquire()
+        try:
+            tiff, layout = await self._reader._open(url)
+            row, column = y0 // layout.block_height, x0 // layout.block_width
+            [tile] = await tiff.fetch_tiles([(column, row)], 0)
+            data = bytes(tile.compressed_bytes)
+        except BaseException as error:
+            self._loop.call_soon(self._gate.release)
+            self._ready.put((key, None, error))
+            return
+        self._pool.submit(self._decode, key, layout, row, column, data)
+
+    def _decode(self, key: Any, layout: CogLayout, row: int, column: int, data: bytes) -> None:
+        slot = self._free.get()
+        try:
+            nbytes = layout.block_height * layout.block_width * layout.bands * layout.dtype.itemsize
+            if slot is None or slot[1].nbytes < nbytes:
+                slot = self._allocate(nbytes)
+            decode_block_into(data, layout, slot[1][:nbytes])
+            self._ready.put((key, RawBlock(slot, layout, row, column), None))
+        except BaseException as error:
+            self._free.put(slot)
+            self._ready.put((key, None, error))
+        finally:
+            self._loop.call_soon_threadsafe(self._gate.release)
+
+
+def decode_block_into(data: bytes, layout: CogLayout, out: np.ndarray) -> None:
+    """Decode one block straight into ``out``, a uint8 buffer of exactly its decoded size."""
+    if layout.compression == ZSTD:
+        import zstandard
+
+        view = memoryview(out).cast("B")
+        with zstandard.ZstdDecompressor().stream_reader(data) as stream:
+            filled = 0
+            while filled < len(view):
+                read = stream.readinto(view[filled:])
+                if not read:
+                    msg = "A zstd block ended before its declared size."
+                    raise ValueError(msg)
+                filled += read
+    elif layout.compression in DEFLATE:
+        out[:] = np.frombuffer(zlib.decompress(data), np.uint8)
+    elif layout.compression == NO_COMPRESSION:
+        out[:] = np.frombuffer(data, np.uint8)
+    else:
+        msg = f"COG compression {layout.compression} is not supported."
+        raise NotImplementedError(msg)

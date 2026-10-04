@@ -151,3 +151,27 @@ def test_an_aoi_keeps_only_blocks_whose_footprint_it_touches(
     assert {
         tuple((part["start"], part["stop"]) for part in chunk["slice"]) for chunk in results.chunks
     } == {((0, 16), (0, 16))}
+
+
+def test_the_torch_backend_streams_raw_blocks_to_the_same_neighbours_as_numpy(
+    manifest: str, cogs: tuple[list[str], np.ndarray]
+) -> None:
+    pytest.importorskip("torch")
+    from rayzin.enums import SearchBackendType
+
+    urls, target = cogs
+    queries = np.stack([target, np.random.default_rng(3).normal(size=BANDS).astype(np.float32)])
+
+    streamed = knn_cog_search(
+        manifest, queries, k=5, backend=SearchBackendType.TORCH, batch_size=16, prefetch=3
+    )
+    read = knn_cog_search(manifest, queries, k=5, batch_size=16)
+
+    assert streamed.chunks[0]["url"] == urls[2]
+    assert streamed.offsets[0] == (PLANTED[0] - 16) * BLOCK + PLANTED[1]
+    assert sorted(zip(streamed.query_ids, streamed.offsets)) == sorted(
+        zip(read.query_ids, read.offsets)
+    )
+    np.testing.assert_allclose(
+        sorted(streamed.distances), sorted(read.distances), rtol=1e-4, atol=1e-5
+    )

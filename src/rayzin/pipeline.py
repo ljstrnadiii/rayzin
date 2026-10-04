@@ -73,13 +73,16 @@ def knn_cog_search(
     num_gpus_per_actor: float = 0.0,
     actor_pool_size: int = 4,
     prefetch: int = 8,
+    decode_threads: int = 4,
     filesystem: Any = None,
 ) -> SearchResults:
     """Exact top-``k`` over the COG blocks of a manifest built by ``build_manifest_from_cogs``.
 
     ``filter_expr`` and ``aoi`` prune blocks on their metadata and footprints before any read;
     surviving blocks are read ``prefetch`` at a time per actor. ``normalize`` must match the
-    manifest's. With ``SearchBackendType.FAISS_GPU``, give each actor a GPU. ``filesystem``, a
+    manifest's. ``SearchBackendType.TORCH`` streams blocks instead: ``prefetch`` fetch at once,
+    ``decode_threads`` decompress straight into pinned buffers, and the GPU does the rest; give
+    each actor a GPU with ``num_gpus_per_actor``, as for ``FAISS_GPU``. ``filesystem``, a
     ``pyarrow.fs.FileSystem``, reads the manifest, with ``manifest_path`` relative to it.
     """
     queries = _as_query_batch(query)
@@ -91,7 +94,11 @@ def knn_cog_search(
         queries,
         k,
         reader_type=ReaderType.COG,
-        reader_kwargs={"normalize": normalize, "store_kwargs": store_kwargs or {}},
+        reader_kwargs={
+            "normalize": normalize,
+            "store_kwargs": store_kwargs or {},
+            "decode_threads": decode_threads,
+        },
         metric=metric,
         backend=backend,
         filter_expr=filter_expr,

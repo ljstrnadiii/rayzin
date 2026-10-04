@@ -125,11 +125,12 @@ def _lower_bounds(
     metric_type: MetricType,
 ) -> Float32Array:
     if metric_type == MetricType.EUCLIDEAN:
-        deltas = np.asarray(
-            centroids[:, None, :] - queries[None, :, :],
-            dtype=np.float32,
+        squared = (
+            np.einsum("ij,ij->i", centroids, centroids)[:, None]
+            + np.einsum("ij,ij->i", queries, queries)[None, :]
+            - 2.0 * (centroids @ queries.T)
         )
-        centroid_distances = np.linalg.norm(deltas, axis=2)
+        centroid_distances = np.sqrt(np.maximum(squared, 0.0))
         return np.asarray(
             np.square(np.maximum(0.0, centroid_distances - radii[:, None])),
             dtype=np.float32,

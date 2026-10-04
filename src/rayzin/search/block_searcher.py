@@ -1,3 +1,4 @@
+from collections.abc import Iterator
 from typing import Any
 
 import numpy as np
@@ -56,7 +57,10 @@ class BlockSearcher:
         self.nq = self.queries.shape[0]
         self.k = k
         self.reader = make_reader(ReaderType(reader_type), **reader_kwargs)
-        self.backend = make_search_backend(SearchBackendType(backend_type), metric)
+        self.backend = make_search_backend(
+            SearchBackendType(backend_type), metric, normalize=reader_kwargs.get("normalize", True)
+        )
+        self._stream: Any = None
         self.heap = self.backend.create_heap(self.nq, self.k)
         self.heap_actor = heap_actor
         self.global_tau = np.full(self.nq, float("inf"), dtype=np.float32)
@@ -83,33 +87,21 @@ class BlockSearcher:
                 )
                 raise ValueError(msg)
 
-        position = 0
-        reads: list[tuple[LowerBoundRow, tuple[Float32Array, tuple[int, ...]]]] = []
-        while True:
-            if not reads:
-                group, position = self._next_group(rows, position)
-                if not group:
-                    break
-                chunks = [_chunk_record(row) for row in group]
-                read_many = getattr(self.reader, "read_many", None)
-                fetched = read_many(chunks) if read_many else [self.reader.read(c) for c in chunks]
-                reads = list(zip(group, fetched, strict=True))
-            row, (vectors, _shape) = reads.pop(0)
-
-            effective_tau = np.minimum(self.heap.tau, self.global_tau)
-            active_mask = np.asarray(row[COL_LOWER_BOUNDS] < effective_tau, dtype=bool)
-            if not np.any(active_mask):
-                continue
-
-            rows_searched += 1
-            active_query_ids = np.asarray(np.flatnonzero(active_mask), dtype=np.int64)
-            query_evaluations += int(len(active_query_ids))
+        reads = self._streamed(rows) if self._streams() else self._grouped(rows)
+        for row, payload in reads:
+            try:
+                effective_tau = np.minimum(self.heap.tau, self.global_tau)
+                active_mask = np.asarray(row[COL_LOWER_BOUNDS] < effective_tau, dtype=bool)
+                if not np.any(active_mask):
+                    continue
+                rows_searched += 1
+                active_query_ids = np.asarray(np.flatnonzero(active_mask), dtype=np.int64)
+                query_evaluations += int(len(active_query_ids))
+                distances, local_indices = self._score(payload, active_mask)
+            finally:
+                if self._stream is not None and not isinstance(payload, tuple):
+                    self._stream.release(payload)
             chunk_ref = _chunk_ref(_chunk_record(row))
-            distances, local_indices = self.backend.search(
-                vectors,
-                self.queries[active_mask],
-                self.k,
-            )
             new_results = self.heap.add_result_subset(
                 active_query_ids,
                 distances,
@@ -151,6 +143,62 @@ class BlockSearcher:
             },
             schema=BLOCK_SEARCH_SUMMARY_SCHEMA,
         )
+
+    def _streams(self) -> bool:
+        from rayzin.readers.cog_reader import CogVectorReader
+
+        return hasattr(self.backend, "search_raw") and isinstance(self.reader, CogVectorReader)
+
+    def _grouped(self, rows: list[LowerBoundRow]) -> Iterator[tuple[LowerBoundRow, Any]]:
+        position = 0
+        while True:
+            group, position = self._next_group(rows, position)
+            if not group:
+                return
+            chunks = [_chunk_record(row) for row in group]
+            read_many = getattr(self.reader, "read_many", None)
+            fetched = read_many(chunks) if read_many else [self.reader.read(c) for c in chunks]
+            yield from zip(group, fetched, strict=True)
+
+    def _streamed(self, rows: list[LowerBoundRow]) -> Iterator[tuple[LowerBoundRow, Any]]:
+        """Keep ``prefetch`` blocks fetching and decoding while earlier ones are scored."""
+        if self._stream is None:
+            from rayzin.readers.cog_reader import RawBlockStream
+
+            self._stream = RawBlockStream(
+                self.reader,  # type: ignore[arg-type]
+                self.backend.allocate,  # type: ignore[attr-defined]
+                in_flight=self.prefetch,
+                threads=self.reader.decode_threads,  # type: ignore[attr-defined]
+            )
+        stream = self._stream
+        waiting: dict[int, LowerBoundRow] = {}
+        position = 0
+        while True:
+            while stream.pending < self.prefetch and position < len(rows):
+                row = rows[position]
+                effective_tau = np.minimum(self.heap.tau, self.global_tau)
+                if row[COL_MIN_LOWER_BOUND] >= float(np.max(effective_tau)):
+                    position = len(rows)
+                    break
+                position += 1
+                if np.any(row[COL_LOWER_BOUNDS] < effective_tau):
+                    waiting[position] = row
+                    origin = {part[COL_DIM]: part[COL_START] for part in row[COL_SLICE]}
+                    stream.submit(position, row[COL_URL], origin["y"], origin["x"])
+            if not stream.pending:
+                return
+            key, block = stream.next()
+            yield waiting.pop(key), block
+
+    def _score(self, payload: Any, active_mask: np.ndarray) -> tuple[Float32Array, Any]:
+        if isinstance(payload, tuple):
+            vectors, _shape = payload
+            return self.backend.search(vectors, self.queries[active_mask], self.k)
+        distances, indices = self.backend.search_raw(  # type: ignore[attr-defined]
+            payload, self.queries, self.k
+        )
+        return distances[active_mask], indices[active_mask]
 
     def _next_group(
         self, rows: list[LowerBoundRow], position: int
