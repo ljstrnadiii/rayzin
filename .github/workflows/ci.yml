@@ -21,7 +21,7 @@ jobs:
 
       - uses: prefix-dev/setup-pixi@v0.9.5
         with:
-          pixi-version: v0.62.2
+          pixi-version: v0.71.1
           manifest-path: pyproject.toml
           environments: dev
           locked: true
@@ -41,7 +41,7 @@ jobs:
 
       - uses: prefix-dev/setup-pixi@v0.9.5
         with:
-          pixi-version: v0.62.2
+          pixi-version: v0.71.1
           manifest-path: pyproject.toml
           environments: dev
           locked: true
