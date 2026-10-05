@@ -1,4 +1,4 @@
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Final, TypeAlias, TypedDict
 
 import numpy as np
@@ -61,6 +61,7 @@ class SearchResults:
     chunks: list[ChunkRef]
     offsets: list[int]
     distances: list[float]
+    stats: dict[str, int] = field(default_factory=dict)
 
     def to_rows(self) -> list[dict[str, object]]:
         return [

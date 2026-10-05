@@ -1,3 +1,4 @@
+from dataclasses import replace
 from typing import Any
 
 import numpy as np
@@ -143,7 +144,7 @@ def _knn_search(
         backend_type=backend.value,
     )
 
-    (
+    summary = (
         filter_manifest(
             ray.data.read_parquet(manifest_path, filesystem=filesystem).filter(
                 expr=col(COL_COUNT) > 0
@@ -178,9 +179,18 @@ def _knn_search(
             num_gpus=num_gpus_per_actor,
         )
         .materialize()
+        .to_pandas()
     )
-
-    return ray.get(heap_actor.results.remote())  # type: ignore[no-any-return]
+    results: SearchResults = ray.get(heap_actor.results.remote())
+    return replace(
+        results,
+        stats={
+            "blocks_after_pushdown": int(summary["rows_seen"].sum()),
+            "blocks_searched": int(summary["rows_searched"].sum()),
+            "vectors_searched": int(summary["vectors_searched"].sum()),
+            "query_evaluations": int(summary["query_evaluations"].sum()),
+        },
+    )
 
 
 def build_manifest(

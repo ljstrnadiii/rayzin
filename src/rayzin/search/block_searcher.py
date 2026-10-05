@@ -87,6 +87,8 @@ class BlockSearcher:
                 )
                 raise ValueError(msg)
 
+        vectors_searched = 0
+        device_heap = self._streams() and hasattr(self.heap, "add_device")
         reads = self._streamed(rows) if self._streams() else self._grouped(rows)
         for row, payload in reads:
             try:
@@ -95,13 +97,20 @@ class BlockSearcher:
                 if not np.any(active_mask):
                     continue
                 rows_searched += 1
+                vectors_searched += row[COL_COUNT]
                 active_query_ids = np.asarray(np.flatnonzero(active_mask), dtype=np.int64)
                 query_evaluations += int(len(active_query_ids))
+                chunk_ref = _chunk_ref(_chunk_record(row))
+                if device_heap:
+                    distances, local_indices = self.backend.search_raw_device(  # type: ignore[attr-defined]
+                        payload, self.queries, self.k
+                    )
+                    self.heap.add_device(active_mask, distances, local_indices, chunk_ref)  # type: ignore[attr-defined]
+                    continue
                 distances, local_indices = self._score(payload, active_mask)
             finally:
                 if self._stream is not None and not isinstance(payload, tuple):
                     self._stream.release(payload)
-            chunk_ref = _chunk_ref(_chunk_record(row))
             new_results = self.heap.add_result_subset(
                 active_query_ids,
                 distances,
@@ -115,6 +124,12 @@ class BlockSearcher:
             added_chunks.extend(new_results.chunks)
             added_offsets.extend(new_results.offsets)
             added_distances.extend(new_results.distances)
+
+        drain = getattr(self.heap, "drain", None)
+        if drain is not None:
+            drained = drain()
+            added_query_ids, added_chunks = drained.query_ids, drained.chunks
+            added_offsets, added_distances = drained.offsets, drained.distances
 
         if added_offsets:
             merged_tau = np.asarray(
@@ -140,6 +155,7 @@ class BlockSearcher:
                 "rows_searched": [rows_searched],
                 "query_evaluations": [query_evaluations],
                 "results_added": [len(added_offsets)],
+                "vectors_searched": [vectors_searched],
             },
             schema=BLOCK_SEARCH_SUMMARY_SCHEMA,
         )

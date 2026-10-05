@@ -62,13 +62,31 @@ def test_block_searcher_accumulates_heap_across_batches(
     third = searcher(_batch_for_x_start(15, min_lower_bound=15.0, lower_bounds=[15.0]))
 
     assert first.to_pylist() == [
-        {"rows_seen": 1, "rows_searched": 1, "query_evaluations": 1, "results_added": 1}
+        {
+            "rows_seen": 1,
+            "rows_searched": 1,
+            "query_evaluations": 1,
+            "results_added": 1,
+            "vectors_searched": 1,
+        }
     ]
     assert second.to_pylist() == [
-        {"rows_seen": 1, "rows_searched": 1, "query_evaluations": 1, "results_added": 1}
+        {
+            "rows_seen": 1,
+            "rows_searched": 1,
+            "query_evaluations": 1,
+            "results_added": 1,
+            "vectors_searched": 1,
+        }
     ]
     assert third.to_pylist() == [
-        {"rows_seen": 1, "rows_searched": 0, "query_evaluations": 0, "results_added": 0}
+        {
+            "rows_seen": 1,
+            "rows_searched": 0,
+            "query_evaluations": 0,
+            "results_added": 0,
+            "vectors_searched": 0,
+        }
     ]
     calls = ray.get(heap_actor.calls_made.remote())
     assert len(calls) == 2
@@ -106,10 +124,22 @@ def test_block_searcher_returns_empty_batch_when_no_result_beats_tau(
     second = searcher(_batch_for_x_start(20))
 
     assert first.to_pylist() == [
-        {"rows_seen": 1, "rows_searched": 1, "query_evaluations": 1, "results_added": 1}
+        {
+            "rows_seen": 1,
+            "rows_searched": 1,
+            "query_evaluations": 1,
+            "results_added": 1,
+            "vectors_searched": 1,
+        }
     ]
     assert second.to_pylist() == [
-        {"rows_seen": 1, "rows_searched": 1, "query_evaluations": 1, "results_added": 0}
+        {
+            "rows_seen": 1,
+            "rows_searched": 1,
+            "query_evaluations": 1,
+            "results_added": 0,
+            "vectors_searched": 1,
+        }
     ]
     calls = ray.get(heap_actor.calls_made.remote())
     assert len(calls) == 1
@@ -168,7 +198,13 @@ def test_block_searcher_pushes_results_to_heap_actor(
     result = searcher(_batch_for_x_start(10))
 
     assert result.to_pylist() == [
-        {"rows_seen": 1, "rows_searched": 1, "query_evaluations": 1, "results_added": 1}
+        {
+            "rows_seen": 1,
+            "rows_searched": 1,
+            "query_evaluations": 1,
+            "results_added": 1,
+            "vectors_searched": 1,
+        }
     ]
     calls = ray.get(heap_actor.calls_made.remote())
     assert len(calls) == 1
@@ -249,10 +285,22 @@ def test_block_searcher_uses_cached_global_tau_for_pruning(
     )
 
     assert first.to_pylist() == [
-        {"rows_seen": 1, "rows_searched": 1, "query_evaluations": 1, "results_added": 1}
+        {
+            "rows_seen": 1,
+            "rows_searched": 1,
+            "query_evaluations": 1,
+            "results_added": 1,
+            "vectors_searched": 1,
+        }
     ]
     assert second.to_pylist() == [
-        {"rows_seen": 2, "rows_searched": 0, "query_evaluations": 0, "results_added": 0}
+        {
+            "rows_seen": 2,
+            "rows_searched": 0,
+            "query_evaluations": 0,
+            "results_added": 0,
+            "vectors_searched": 0,
+        }
     ]
 
 

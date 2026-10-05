@@ -67,6 +67,7 @@ BLOCK_SEARCH_SUMMARY_SCHEMA: pa.Schema = pa.schema(
         pa.field("rows_searched", pa.int64()),
         pa.field("query_evaluations", pa.int64()),
         pa.field("results_added", pa.int64()),
+        pa.field("vectors_searched", pa.int64()),
     ]
 )
 

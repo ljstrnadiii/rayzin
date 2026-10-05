@@ -137,6 +137,7 @@ def test_a_metadata_filter_prunes_files_before_they_are_read(
     results = knn_cog_search(manifest, target[None, :], k=3, filter_expr=col("year") < 2026)
 
     assert urls[2] not in {chunk["url"] for chunk in results.chunks}
+    assert results.stats["blocks_after_pushdown"] == 2 * (SIDE // BLOCK) ** 2
 
 
 def test_an_aoi_keeps_only_blocks_whose_footprint_it_touches(
