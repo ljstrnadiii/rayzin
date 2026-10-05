@@ -32,6 +32,7 @@ class ShardSearcher:
         reader_kwargs: dict[str, Any],
         backend_type: str,
         metric_type: str,
+        reader_type: str = ReaderType.COG.value,
     ) -> None:
         import pyarrow.dataset as ds  # type: ignore[import-untyped]
 
@@ -48,7 +49,7 @@ class ShardSearcher:
             queries=np.zeros((1, 1), dtype=np.float32),
             k=1,
             metric_type=metric_type,
-            reader_type=ReaderType.COG.value,
+            reader_type=reader_type,
             reader_kwargs=reader_kwargs,
             backend_type=backend_type,
             heap_actor=None,
@@ -82,10 +83,11 @@ class ShardSearcher:
         }
 
 
-class CogSearcher:
-    """Exact KNN over a COG manifest, loaded once and searched many times.
+class KnnSearcher:
+    """Exact KNN over a manifest, loaded once and searched many times.
 
-    ``knn_cog_search`` starts its actors, reads the manifest and builds a heap on every call.
+    ``knn_cog_search`` and ``knn_parquet_search`` start actors, read the manifest and build a
+    heap on every call.
     This keeps all of that alive between searches: the manifest's files are split across
     ``actors`` actors, one per GPU with ``num_gpus_per_actor=1``, each holding its share with a
     warm reader, backend and block stream, and one heap actor merges their top ``k``. Call
@@ -94,7 +96,9 @@ class CogSearcher:
     ``filter_expr`` is a ``pyarrow.compute.Expression`` over manifest columns and ``aoi`` a
     lon/lat geometry tested against block footprints. ``filesystem`` may be a zero-argument
     callable, run on each actor, for filesystems that do not pickle. The other arguments mean
-    what they do for ``knn_cog_search``.
+    what they do for ``knn_cog_search``. ``reader`` picks the manifest's kind: ``COG`` for
+    rasters, ``PARQUET`` for vectors stored as rows, with ``reader_kwargs`` such as ``column``,
+    ``row_filter`` and ``row_filter_columns`` passed to ``ParquetVectorReader``.
     """
 
     def __init__(
@@ -111,6 +115,8 @@ class CogSearcher:
         store_kwargs: dict[str, Any] | None = None,
         filesystem: FileSystem | Callable[[], FileSystem] = None,
         prune: bool = True,
+        reader: ReaderType = ReaderType.COG,
+        reader_kwargs: dict[str, Any] | None = None,
     ) -> None:
         import pyarrow.dataset as ds
         import pyarrow.fs as pafs  # type: ignore[import-untyped]
@@ -122,9 +128,7 @@ class CogSearcher:
             local, manifest_path = pafs.FileSystem.from_uri(manifest_path)
             filesystem = local
         files = sorted(ds.dataset(manifest_path, filesystem=local, format="parquet").files)
-        shard = ray.remote(num_cpus=num_cpus_per_actor, num_gpus=num_gpus_per_actor)(
-            ShardSearcher
-        )
+        shard = ray.remote(num_cpus=num_cpus_per_actor, num_gpus=num_gpus_per_actor)(ShardSearcher)
         self._shards: list[Any] = [
             shard.remote(
                 files[index::actors],
@@ -134,19 +138,19 @@ class CogSearcher:
                 reader_kwargs={
                     "normalize": normalize,
                     "store_kwargs": store_kwargs or {},
-                    "decode_threads": decode_threads,
+                    **({"decode_threads": decode_threads} if reader == ReaderType.COG else {}),
+                    **(reader_kwargs or {}),
                 },
                 backend_type=backend.value,
                 metric_type=MetricType.EUCLIDEAN.value,
+                reader_type=reader.value,
             )
             for index in range(min(actors, len(files)))
         ]
         self._heap = HeapActor.options(num_cpus=0).remote(  # type: ignore[attr-defined]
             nq=1, k=1, metric_type=MetricType.EUCLIDEAN.value, backend_type=backend.value
         )
-        self.blocks = sum(
-            ray.get([s.rows.remote() for s in self._shards])
-        )
+        self.blocks = sum(ray.get([s.rows.remote() for s in self._shards]))
         self.startup_seconds = time.perf_counter() - started
 
     def search(

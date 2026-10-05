@@ -12,6 +12,7 @@ from rayzin.enums import MetricType, ReaderType, SearchBackendType
 from rayzin.manifest.build import build_zarr_chunk_table, compute_chunk_summary_arrow
 from rayzin.manifest.cog import summarize_cog_blocks
 from rayzin.manifest.filtering import filter_manifest
+from rayzin.manifest.parquet import summarize_parquet_row_groups
 from rayzin.manifest.schema import MANIFEST_SCHEMA
 from rayzin.metrics import add_lower_bounds_fn
 from rayzin.readers.zarr_reader import ZarrVectorReader
@@ -118,6 +119,66 @@ def knn_cog_search(
             "normalize": normalize,
             "store_kwargs": store_kwargs or {},
             "decode_threads": decode_threads,
+        },
+        metric=metric,
+        backend=backend,
+        filter_expr=filter_expr,
+        aoi=aoi,
+        store_kwargs=store_kwargs or {},
+        batch_size=batch_size,
+        num_cpus_per_actor=num_cpus_per_actor,
+        num_gpus_per_actor=num_gpus_per_actor,
+        actor_pool_size=actor_pool_size,
+        prefetch=prefetch,
+        filesystem=filesystem,
+        prune=prune,
+    )
+
+
+def knn_parquet_search(
+    manifest_path: str,
+    query: np.ndarray,
+    k: int,
+    *,
+    column: str = "embedding",
+    row_filter: Any = None,
+    row_filter_columns: tuple[str, ...] = (),
+    store_kwargs: dict[str, Any] | None = None,
+    normalize: bool = True,
+    metric: MetricType = MetricType.EUCLIDEAN,
+    backend: SearchBackendType = SearchBackendType.NUMPY,
+    filter_expr: Expr | None = None,
+    aoi: BaseGeometry | None = None,
+    batch_size: int | None = None,
+    num_cpus_per_actor: float = 1.0,
+    num_gpus_per_actor: float = 0.0,
+    actor_pool_size: int = 4,
+    prefetch: int = 8,
+    filesystem: Any = None,
+    prune: bool = True,
+) -> SearchResults:
+    """Exact top-``k`` over the row groups of a manifest built by ``build_manifest_from_parquet``.
+
+    ``filter_expr`` and ``aoi`` prune whole row groups first, as for ``knn_cog_search``.
+    ``row_filter``, a ``pyarrow.compute.Expression`` over ``row_filter_columns``, then drops
+    single rows as they are read, e.g. ``pc.field("score") > 0.1``. A result's offset is its
+    row within its row group. The other arguments mean what they do for ``knn_cog_search``.
+    """
+    queries = _as_query_batch(query)
+    if normalize:
+        norms = np.linalg.norm(queries, axis=1, keepdims=True)
+        queries = (queries / np.maximum(norms, 1e-12)).astype(np.float32)
+    return _knn_search(
+        manifest_path,
+        queries,
+        k,
+        reader_type=ReaderType.PARQUET,
+        reader_kwargs={
+            "column": column,
+            "normalize": normalize,
+            "store_kwargs": store_kwargs or {},
+            "row_filter": row_filter,
+            "row_filter_columns": row_filter_columns,
         },
         metric=metric,
         backend=backend,
@@ -307,7 +368,69 @@ def build_manifest_from_cogs(
     growing collection is only ever scanned once. ``filesystem``, a ``pyarrow.fs.FileSystem``,
     holds the manifest, with ``output_path`` relative to it. Returns how many files were added.
     """
-    urls = list(cog_urls)
+    return _append_to_manifest(
+        cog_urls,
+        output_path,
+        summarize_cog_blocks,
+        {
+            "normalize": normalize,
+            "store_kwargs": store_kwargs or {},
+            "files_in_flight": files_in_flight,
+        },
+        metadata=metadata,
+        files_per_task=files_per_task,
+        filesystem=filesystem,
+    )
+
+
+def build_manifest_from_parquet(
+    parquet_urls: list[str],
+    output_path: str,
+    *,
+    column: str = "embedding",
+    geometry: str | None = "geometry",
+    metadata: dict[str, list[Any]] | None = None,
+    store_kwargs: dict[str, Any] | None = None,
+    normalize: bool = True,
+    files_per_task: int = 8,
+    files_in_flight: int = 4,
+    filesystem: Any = None,
+) -> int:
+    """Summarise every row group of each Parquet file not yet in the manifest at ``output_path``.
+
+    For vectors stored as rows, e.g. one detection per row with its embedding in ``column``, a
+    fixed-size list. One manifest row per row group: its slice, count, centroid, radius and,
+    with a lon/lat ``geometry`` column, its bounding box for ``aoi``, plus the ``metadata``
+    columns. Incremental, as ``build_manifest_from_cogs``. Returns how many files were added.
+    """
+    return _append_to_manifest(
+        parquet_urls,
+        output_path,
+        summarize_parquet_row_groups,
+        {
+            "column": column,
+            "geometry": geometry,
+            "normalize": normalize,
+            "store_kwargs": store_kwargs or {},
+            "files_in_flight": files_in_flight,
+        },
+        metadata=metadata,
+        files_per_task=files_per_task,
+        filesystem=filesystem,
+    )
+
+
+def _append_to_manifest(
+    urls: list[str],
+    output_path: str,
+    summarize: Any,
+    arguments: dict[str, Any],
+    *,
+    metadata: dict[str, list[Any]] | None,
+    files_per_task: int,
+    filesystem: Any,
+) -> int:
+    urls = list(urls)
     indexed = manifest_urls(output_path, filesystem)
     new = [index for index, url in enumerate(urls) if url not in indexed]
     if not new:
@@ -319,14 +442,10 @@ def build_manifest_from_cogs(
     (
         ray.data.from_arrow(pa.table(columns), override_num_blocks=-(-len(new) // files_per_task))
         .map_batches(
-            summarize_cog_blocks,  # type: ignore[arg-type]
+            summarize,
             batch_size=None,
             batch_format="pyarrow",
-            fn_kwargs={
-                "normalize": normalize,
-                "store_kwargs": store_kwargs or {},
-                "files_in_flight": files_in_flight,
-            },
+            fn_kwargs=arguments,
             udf_modifying_row_count=True,
         )
         .write_parquet(output_path, filesystem=filesystem, mode=ray.data.SaveMode.APPEND)

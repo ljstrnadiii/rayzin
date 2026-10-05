@@ -199,12 +199,12 @@ def test_a_searcher_answers_repeated_and_filtered_searches_like_a_one_shot_searc
     import pyarrow.compute as pc  # type: ignore[import-untyped]
 
     from rayzin.enums import SearchBackendType
-    from rayzin.searcher import CogSearcher
+    from rayzin.searcher import KnnSearcher
 
     urls, target = cogs
     queries = np.stack([target, np.random.default_rng(7).normal(size=BANDS).astype(np.float32)])
     one_shot = knn_cog_search(manifest, queries, k=5)
-    searcher = CogSearcher(manifest, actors=1, backend=SearchBackendType.NUMPY)
+    searcher = KnnSearcher(manifest, actors=1, backend=SearchBackendType.NUMPY)
     try:
         first = searcher.search(queries, k=5)
         again = searcher.search(queries, k=5)

@@ -87,9 +87,14 @@ def summarize_cog_blocks(
 
 
 def _summary(block: Block) -> tuple[int, np.ndarray, float]:
-    kept = block.vectors[block.valid]
+    return vector_summary(block.vectors, block.valid)
+
+
+def vector_summary(vectors: np.ndarray, valid: np.ndarray) -> tuple[int, np.ndarray, float]:
+    """Count, centroid and radius of a chunk's valid vectors; zeros when it has none."""
+    kept = vectors[valid]
     if not len(kept):
-        return 0, np.zeros(block.vectors.shape[1], np.float32), 0.0
+        return 0, np.zeros(vectors.shape[1], np.float32), 0.0
     centroid = kept.mean(axis=0, dtype=np.float32)
     squared = np.einsum("ij,ij->i", kept, kept) - 2 * kept @ centroid + float(centroid @ centroid)
     return int(len(kept)), centroid, float(np.sqrt(max(float(squared.max()), 0.0)))

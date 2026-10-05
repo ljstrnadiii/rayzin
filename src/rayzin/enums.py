@@ -9,6 +9,7 @@ class MetricType(StrEnum):
 class ReaderType(StrEnum):
     ZARR = "zarr"
     COG = "cog"
+    PARQUET = "parquet"
 
 
 class SearchBackendType(StrEnum):
