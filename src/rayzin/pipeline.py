@@ -4,6 +4,7 @@ from typing import Any
 import numpy as np
 import pyarrow as pa  # type: ignore[import-untyped]
 import ray.data
+from ray.data import ActorPoolStrategy
 from ray.data.expressions import Expr, col
 from shapely.geometry.base import BaseGeometry  # type: ignore[import-untyped]
 
@@ -154,84 +155,69 @@ def _knn_search(
         msg = "Search pruning currently supports only the euclidean metric."
         raise NotImplementedError(msg)
 
-    heap_actor = HeapActor.options(num_cpus=0).remote(  # type: ignore[attr-defined]
+    heap_actor = HeapActor.remote(  # type: ignore[attr-defined]
         nq=query.shape[0],
         k=k,
         metric_type=metric.value,
         backend_type=backend.value,
     )
-    searcher = ray.remote(num_cpus=num_cpus_per_actor, num_gpus=num_gpus_per_actor)(BlockSearcher)
-    searchers = [
-        searcher.remote(
-            queries=query,
-            k=k,
-            metric_type=metric.value,
-            reader_type=reader_type.value,
-            reader_kwargs=reader_kwargs,
-            backend_type=backend.value,
-            heap_actor=heap_actor,
-            prefetch=prefetch,
+
+    columns = None if prune else _columns_without_centroids(manifest_path, filesystem)
+    bounded = filter_manifest(
+        ray.data.read_parquet(manifest_path, filesystem=filesystem, columns=columns).filter(
+            expr=col(COL_COUNT) > 0
+        ),
+        filter_expr=filter_expr,
+        aoi=aoi,
+        store_kwargs=store_kwargs,
+    )
+    if prune:
+        bounded = bounded.map_batches(
+            add_lower_bounds_fn,  # type: ignore[arg-type]
+            fn_kwargs={"queries": query, "metric_type": metric.value},
+            batch_format="pyarrow",
+            udf_modifying_row_count=False,
         )
-        for _ in range(_placeable(actor_pool_size, num_cpus_per_actor, num_gpus_per_actor))
-    ]
-    try:
-        columns = None if prune else _columns_without_centroids(manifest_path, filesystem)
-        bounded = filter_manifest(
-            ray.data.read_parquet(manifest_path, filesystem=filesystem, columns=columns).filter(
-                expr=col(COL_COUNT) > 0
-            ),
-            filter_expr=filter_expr,
-            aoi=aoi,
-            store_kwargs=store_kwargs,
-        )
-        if prune:
-            bounded = bounded.map_batches(
-                add_lower_bounds_fn,  # type: ignore[arg-type]
-                fn_kwargs={"queries": query, "metric_type": metric.value},
-                batch_format="pyarrow",
-                udf_modifying_row_count=False,
-            )
+    if batch_size is None:
         bounded = bounded.materialize()
         rows = bounded.count()
-        used = searchers[: max(1, min(len(searchers), rows))]
-        cuts = [round(rows * i / len(used)) for i in range(1, len(used))]
-        shares = bounded.split_at_indices(cuts) if cuts else [bounded]
-        summaries = [
-            summary
-            for found in ray.get(
-                [
-                    actor.search_tables.remote(share.to_arrow_refs(), batch_size)  # type: ignore[attr-defined]
-                    for actor, share in zip(used, shares, strict=True)
-                ]
-            )
-            for summary in found
-        ]
-        results: SearchResults = ray.get(heap_actor.results.remote())
-    finally:
-        for actor in (*searchers, heap_actor):
-            ray.kill(actor)
+        actor_pool_size = max(1, min(actor_pool_size, rows))
+        batch_size = max(1, -(-rows // actor_pool_size))
+        bounded = bounded.repartition(actor_pool_size)
+
+    summary = (
+        bounded.map_batches(
+            BlockSearcher,
+            fn_constructor_kwargs={
+                "queries": query,
+                "k": k,
+                "metric_type": metric.value,
+                "reader_type": reader_type.value,
+                "reader_kwargs": reader_kwargs,
+                "backend_type": backend.value,
+                "heap_actor": heap_actor,
+                "prefetch": prefetch,
+            },
+            batch_size=batch_size,
+            batch_format="pyarrow",
+            udf_modifying_row_count=True,
+            compute=ActorPoolStrategy(min_size=1, max_size=actor_pool_size),
+            num_cpus=num_cpus_per_actor,
+            num_gpus=num_gpus_per_actor,
+        )
+        .materialize()
+        .to_pandas()
+    )
+    results: SearchResults = ray.get(heap_actor.results.remote())
     return replace(
         results,
         stats={
-            name: int(sum(summary[column] for summary in summaries))
-            for name, column in (
-                ("blocks_after_pushdown", "rows_seen"),
-                ("blocks_searched", "rows_searched"),
-                ("vectors_searched", "vectors_searched"),
-                ("query_evaluations", "query_evaluations"),
-            )
+            "blocks_after_pushdown": int(summary["rows_seen"].sum()),
+            "blocks_searched": int(summary["rows_searched"].sum()),
+            "vectors_searched": int(summary["vectors_searched"].sum()),
+            "query_evaluations": int(summary["query_evaluations"].sum()),
         },
     )
-
-
-def _placeable(actors: int, cpus: float, gpus: float) -> int:
-    """How many search actors fit at once, leaving a CPU for reading the manifest."""
-    resources = ray.cluster_resources()  # type: ignore[no-untyped-call]
-    if cpus:
-        actors = min(actors, int((resources.get("CPU", 1.0) - 1.0) // cpus))
-    if gpus:
-        actors = min(actors, int(resources.get("GPU", 0.0) // gpus))
-    return max(actors, 1)
 
 
 def _columns_without_centroids(manifest_path: str, filesystem: Any) -> list[str]:
