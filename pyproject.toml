@@ -69,9 +69,13 @@ pyproj = ">=3.6"
 rasterio = ">=1.5.2"
 
 # Dev tooling
-# CPU torch, so CI covers the torch backend; conda-forge's build shares faiss's OpenMP runtime.
+# CPU torch, so CI covers the torch backend.
 [tool.pixi.feature.dev.dependencies]
 pytorch = { version = ">=2.4", channel = "conda-forge" }
+
+# The pytorch channel's faiss links against MKL 2025 (libmkl_*.so.2); keep torch's MKL there too.
+[tool.pixi.feature.dev.target.linux-64.dependencies]
+mkl = "<2026"
 
 [tool.pixi.feature.dev.pypi-dependencies]
 pytest = ">=8.0.0"

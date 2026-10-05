@@ -465,7 +465,7 @@ def manifest_urls(path: str, filesystem: Any = None) -> set[str]:
 def unit_rows(vectors: Float32Array) -> Float32Array:
     """Each row scaled to unit length, as manifests built with ``normalize`` store vectors."""
     norms = np.linalg.norm(vectors, axis=1, keepdims=True)
-    return (vectors / np.maximum(norms, 1e-12)).astype(np.float32)
+    return np.asarray(vectors / np.maximum(norms, 1e-12), dtype=np.float32)
 
 
 def _as_query_batch(query: np.ndarray) -> Float32Array:
