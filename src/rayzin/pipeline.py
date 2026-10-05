@@ -17,7 +17,14 @@ from rayzin.metrics import add_lower_bounds_fn
 from rayzin.readers.zarr_reader import ZarrVectorReader
 from rayzin.search.block_searcher import BlockSearcher
 from rayzin.search.heap_actor import HeapActor
-from rayzin.types import COL_COUNT, COL_URL, Float32Array, SearchResults
+from rayzin.types import (
+    COL_CENTROID,
+    COL_COUNT,
+    COL_RADIUS,
+    COL_URL,
+    Float32Array,
+    SearchResults,
+)
 
 
 def knn_zarr_search(
@@ -76,6 +83,7 @@ def knn_cog_search(
     prefetch: int = 8,
     decode_threads: int = 4,
     filesystem: Any = None,
+    prune: bool = True,
 ) -> SearchResults:
     """Exact top-``k`` over the COG blocks of a manifest built by ``build_manifest_from_cogs``.
 
@@ -88,6 +96,11 @@ def knn_cog_search(
 
     Without a ``batch_size``, the blocks that survive pushdown are split evenly, one share per
     actor, so every actor works however few blocks remain and none waits on a straggler batch.
+
+    ``prune=False`` skips the centroid bounds: centroids are not even read, and every block that
+    survives pushdown is searched for every query. Use it when bounds cannot rule blocks out,
+    e.g. blocks too large for a tight radius, or so many that computing bounds costs more than it
+    saves. The result is the same exact top ``k``.
     """
     queries = _as_query_batch(query)
     if normalize:
@@ -114,6 +127,7 @@ def knn_cog_search(
         actor_pool_size=actor_pool_size,
         prefetch=prefetch,
         filesystem=filesystem,
+        prune=prune,
     )
 
 
@@ -135,6 +149,7 @@ def _knn_search(
     num_gpus_per_actor: float = 0.0,
     prefetch: int = 1,
     filesystem: Any = None,
+    prune: bool = True,
 ) -> SearchResults:
     if metric != MetricType.EUCLIDEAN:
         msg = "Search pruning currently supports only the euclidean metric."
@@ -147,20 +162,27 @@ def _knn_search(
         backend_type=backend.value,
     )
 
+    columns = None if prune else _columns_without_centroids(manifest_path, filesystem)
     bounded = filter_manifest(
-        ray.data.read_parquet(manifest_path, filesystem=filesystem).filter(expr=col(COL_COUNT) > 0),
+        ray.data.read_parquet(manifest_path, filesystem=filesystem, columns=columns).filter(
+            expr=col(COL_COUNT) > 0
+        ),
         filter_expr=filter_expr,
         aoi=aoi,
         store_kwargs=store_kwargs,
-    ).map_batches(
-        add_lower_bounds_fn,  # type: ignore[arg-type]
-        fn_kwargs={"queries": query, "metric_type": metric.value},
-        batch_format="pyarrow",
-        udf_modifying_row_count=False,
     )
+    if prune:
+        bounded = bounded.map_batches(
+            add_lower_bounds_fn,  # type: ignore[arg-type]
+            fn_kwargs={"queries": query, "metric_type": metric.value},
+            batch_format="pyarrow",
+            udf_modifying_row_count=False,
+        )
     if batch_size is None:
         bounded = bounded.materialize()
-        actor_pool_size = max(1, min(actor_pool_size, bounded.count()))
+        rows = bounded.count()
+        actor_pool_size = max(1, min(actor_pool_size, rows))
+        batch_size = max(1, -(-rows // actor_pool_size))
         bounded = bounded.repartition(actor_pool_size)
 
     summary = (
@@ -196,6 +218,13 @@ def _knn_search(
             "query_evaluations": int(summary["query_evaluations"].sum()),
         },
     )
+
+
+def _columns_without_centroids(manifest_path: str, filesystem: Any) -> list[str]:
+    import pyarrow.dataset as ds  # type: ignore[import-untyped]
+
+    schema = ds.dataset(manifest_path, filesystem=filesystem, format="parquet").schema
+    return [name for name in schema.names if name not in (COL_CENTROID, COL_RADIUS)]
 
 
 def build_manifest(
@@ -303,7 +332,7 @@ def build_manifest_from_cogs(
 
 def manifest_urls(path: str, filesystem: Any = None) -> set[str]:
     """Every URL a manifest already indexes; empty when there is no manifest yet."""
-    import pyarrow.dataset as ds  # type: ignore[import-untyped]
+    import pyarrow.dataset as ds
     import pyarrow.fs as pafs  # type: ignore[import-untyped]
 
     if filesystem is None:

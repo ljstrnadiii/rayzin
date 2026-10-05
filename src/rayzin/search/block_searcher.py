@@ -70,7 +70,7 @@ class BlockSearcher:
 
     def _search_batch(self, batch: LowerBoundTable) -> BlockSearchSummaryTable:
         self._refresh_global_tau()
-        rows = _manifest_rows(batch)
+        rows = _manifest_rows(batch, self.nq)
         rows.sort(key=lambda row: row[COL_MIN_LOWER_BOUND])
         added_query_ids: list[int] = []
         added_chunks: list[ChunkRef] = []
@@ -239,27 +239,48 @@ class BlockSearcher:
         self.global_tau = np.minimum(self.global_tau, remote_tau)
 
 
-def _manifest_rows(batch: LowerBoundTable) -> list[LowerBoundRow]:
+def _manifest_rows(batch: LowerBoundTable, nq: int) -> list[LowerBoundRow]:
+    """Rows to search; without bounds columns, pruning is off and every query is a candidate."""
+    rows = batch.num_rows
+    names = batch.column_names
     urls = batch.column(COL_URL).to_pylist()
     slices = batch.column(COL_SLICE).to_pylist()
     counts = batch.column(COL_COUNT).to_pylist()
-    centroids = batch.column(COL_CENTROID).to_pylist()
-    radii = batch.column(COL_RADIUS).to_pylist()
-    lower_bounds = batch.column(COL_LOWER_BOUNDS).to_pylist()
-    min_lower_bounds = batch.column(COL_MIN_LOWER_BOUND).to_pylist()
-
+    if COL_LOWER_BOUNDS in names:
+        lower_bounds = _matrix(batch.column(COL_LOWER_BOUNDS), rows)
+        min_lower_bounds = np.asarray(batch.column(COL_MIN_LOWER_BOUND), dtype=np.float32)
+    else:
+        lower_bounds = np.zeros((rows, nq), dtype=np.float32)
+        min_lower_bounds = np.zeros(rows, dtype=np.float32)
+    centroids = (
+        _matrix(batch.column(COL_CENTROID), rows)
+        if COL_CENTROID in names
+        else np.zeros((rows, 0), dtype=np.float32)
+    )
+    radii = (
+        np.asarray(batch.column(COL_RADIUS), dtype=np.float32)
+        if COL_RADIUS in names
+        else np.zeros(rows, dtype=np.float32)
+    )
     return [
         LowerBoundRow(
             url=str(urls[i]),
             slice=_coerce_index_slice(slices[i]),
             count=int(counts[i]),
-            centroid=np.asarray(centroids[i], dtype=np.float32),
+            centroid=centroids[i],
             radius=float(radii[i]),
-            lower_bounds=np.asarray(lower_bounds[i], dtype=np.float32),
+            lower_bounds=lower_bounds[i],
             min_lower_bound=float(min_lower_bounds[i]),
         )
-        for i in range(batch.num_rows)
+        for i in range(rows)
     ]
+
+
+def _matrix(column: Any, rows: int) -> np.ndarray:
+    """A list column of equal-length rows as one ``(rows, width)`` float32 array."""
+    values = pa.concat_arrays(column.chunks) if isinstance(column, pa.ChunkedArray) else column
+    flat = np.asarray(values.flatten().to_numpy(zero_copy_only=False), dtype=np.float32)
+    return flat.reshape(rows, -1) if rows else flat.reshape(0, 0)
 
 
 def _chunk_record(row: LowerBoundRow) -> ChunkRecord:

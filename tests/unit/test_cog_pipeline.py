@@ -176,3 +176,18 @@ def test_the_torch_backend_streams_raw_blocks_to_the_same_neighbours_as_numpy(
     np.testing.assert_allclose(
         sorted(streamed.distances), sorted(read.distances), rtol=1e-4, atol=1e-5
     )
+
+
+def test_without_pruning_the_search_skips_bounds_and_returns_the_same_neighbours(
+    manifest: str, cogs: tuple[list[str], np.ndarray]
+) -> None:
+    _, target = cogs
+    queries = np.stack([target, np.random.default_rng(5).normal(size=BANDS).astype(np.float32)])
+
+    pruned = knn_cog_search(manifest, queries, k=5)
+    exhaustive = knn_cog_search(manifest, queries, k=5, prune=False)
+
+    assert sorted(zip(exhaustive.query_ids, exhaustive.offsets)) == sorted(
+        zip(pruned.query_ids, pruned.offsets)
+    )
+    assert exhaustive.stats["blocks_searched"] == 3 * (SIDE // BLOCK) ** 2
