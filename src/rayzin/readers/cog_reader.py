@@ -366,7 +366,7 @@ def decode_block_into(data: memoryview | bytes, layout: CogLayout, out: np.ndarr
     if layout.compression == ZSTD:
         import zstandard
 
-        view = memoryview(out).cast("B")
+        view = out.data.cast("B")
         with zstandard.ZstdDecompressor().stream_reader(data) as stream:
             filled = 0
             while filled < len(view):

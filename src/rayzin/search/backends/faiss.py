@@ -1,6 +1,6 @@
 from typing import Any
 
-import faiss
+import faiss  # type: ignore[import-untyped,unused-ignore]
 import numpy as np
 
 from rayzin.enums import MetricType

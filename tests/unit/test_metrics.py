@@ -1,4 +1,4 @@
-import faiss
+import faiss  # type: ignore[import-untyped,unused-ignore]
 import numpy as np
 import pyarrow as pa  # type: ignore[import-untyped]
 import pytest
