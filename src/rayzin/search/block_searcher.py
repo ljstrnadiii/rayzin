@@ -68,6 +68,21 @@ class BlockSearcher:
     def __call__(self, batch: LowerBoundTable) -> BlockSearchSummaryTable:
         return self._search_batch(batch)
 
+    def search_tables(
+        self, tables: list[Any], batch_size: int | None = None
+    ) -> list[dict[str, int]]:
+        """Search this actor's share of the bounded manifest, ``batch_size`` rows at a time."""
+        found = [table for table in ray.get(tables) if table.num_rows]
+        if not found:
+            return [dict.fromkeys(BLOCK_SEARCH_SUMMARY_SCHEMA.names, 0)]
+        share = pa.concat_tables(found, promote_options="permissive")
+        step = batch_size or share.num_rows
+        return [
+            summary
+            for start in range(0, share.num_rows, step)
+            for summary in self._search_batch(share.slice(start, step)).to_pylist()
+        ]
+
     def _search_batch(self, batch: LowerBoundTable) -> BlockSearchSummaryTable:
         self._refresh_global_tau()
         rows = _manifest_rows(batch, self.nq)
