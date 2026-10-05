@@ -1,4 +1,4 @@
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Final, TypeAlias, TypedDict
 
 import numpy as np
@@ -13,6 +13,8 @@ COL_STOP: Final = "stop"
 COL_COUNT: Final = "count"
 COL_CENTROID: Final = "centroid"
 COL_RADIUS: Final = "radius"
+COL_GEOMETRY: Final = "geometry"
+COL_EPSG: Final = "epsg"
 COL_LOWER_BOUNDS: Final = "lower_bounds"
 COL_MIN_LOWER_BOUND: Final = "min_lower_bound"
 
@@ -59,6 +61,7 @@ class SearchResults:
     chunks: list[ChunkRef]
     offsets: list[int]
     distances: list[float]
+    stats: dict[str, int] = field(default_factory=dict)
 
     def to_rows(self) -> list[dict[str, object]]:
         return [

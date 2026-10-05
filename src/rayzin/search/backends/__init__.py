@@ -7,6 +7,7 @@ from rayzin.search.backends.protocols import SearchBackend, SearchResultHeap
 def make_search_backend(
     backend_type: SearchBackendType,
     metric_type: MetricType,
+    normalize: bool = True,
 ) -> SearchBackend:
     if backend_type == SearchBackendType.NUMPY:
         from rayzin.search.backends.numpy import NumpySearchBackend
@@ -19,6 +20,10 @@ def make_search_backend(
             metric_type=metric_type,
             use_gpu=(backend_type == SearchBackendType.FAISS_GPU),
         )
+    if backend_type == SearchBackendType.TORCH:
+        from rayzin.search.backends.torch import TorchSearchBackend
+
+        return TorchSearchBackend(metric_type=metric_type, normalize=normalize)
     raise ValueError(backend_type)
 
 
