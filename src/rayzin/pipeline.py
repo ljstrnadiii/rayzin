@@ -26,6 +26,9 @@ from rayzin.types import (
     SearchResults,
 )
 
+# Ray Data grows an actor pool only while batches queue for it, so give each actor several.
+BATCHES_PER_ACTOR = 4
+
 
 def knn_zarr_search(
     manifest_path: str,
@@ -94,7 +97,7 @@ def knn_cog_search(
     each actor a GPU with ``num_gpus_per_actor``, as for ``FAISS_GPU``. ``filesystem``, a
     ``pyarrow.fs.FileSystem``, reads the manifest, with ``manifest_path`` relative to it.
 
-    Without a ``batch_size``, the blocks that survive pushdown are split evenly, one share per
+    Without a ``batch_size``, the blocks that survive pushdown are split evenly, a few shares per
     actor, so every actor works however few blocks remain and none waits on a straggler batch.
 
     ``prune=False`` skips the centroid bounds: centroids are not even read, and every block that
@@ -182,8 +185,9 @@ def _knn_search(
         bounded = bounded.materialize()
         rows = bounded.count()
         actor_pool_size = max(1, min(actor_pool_size, rows))
-        batch_size = max(1, -(-rows // actor_pool_size))
-        bounded = bounded.repartition(actor_pool_size)
+        batches = actor_pool_size * BATCHES_PER_ACTOR
+        batch_size = max(1, -(-rows // batches))
+        bounded = bounded.repartition(min(batches, max(rows, 1)))
 
     summary = (
         bounded.map_batches(
