@@ -217,3 +217,64 @@ def test_a_searcher_answers_repeated_and_filtered_searches_like_a_one_shot_searc
     assert sorted(zip(again.query_ids, again.offsets)) == expected
     assert urls[2] not in {chunk["url"] for chunk in filtered.chunks}
     assert filtered.stats["blocks_after_pushdown"] == 2 * (SIDE // BLOCK) ** 2
+
+
+def test_a_block_stream_decodes_every_block_like_the_reader_with_few_buffers(
+    cogs: tuple[list[str], np.ndarray],
+) -> None:
+    from rayzin.readers.cog_reader import RawBlockStream
+
+    urls, _ = cogs
+    reader = CogVectorReader(normalize=False)
+    origins = [(url, y0, x0) for url in urls for y0 in (0, BLOCK) for x0 in (0, BLOCK)]
+    expected = reader.run(reader.fetch_blocks(origins))
+
+    def allocate(nbytes: int) -> tuple[np.ndarray, np.ndarray]:
+        buffer = np.empty(nbytes, dtype=np.uint8)
+        return buffer, buffer
+
+    stream = RawBlockStream(reader, allocate, in_flight=2, threads=1)
+    seen = {}
+    try:
+        for key, origin in enumerate(origins):
+            stream.submit(key, *origin)
+        while stream.pending:
+            key, block = stream.next()
+            pixels = block.slot[1][: block.nbytes].view(block.layout.dtype)
+            seen[key] = pixels.reshape(-1, BANDS).astype(np.float32)
+            stream.release(block)
+    finally:
+        stream.close()
+
+    for key, decoded in enumerate(expected):
+        np.testing.assert_array_equal(seen[key], decoded.vectors)
+
+
+def test_the_torch_heap_merges_blocks_and_result_sets_like_the_numpy_heap() -> None:
+    torch = pytest.importorskip("torch")
+    from rayzin.search.backends.numpy import NumpyResultHeap
+    from rayzin.search.backends.torch import TorchResultHeap
+
+    rng = np.random.default_rng(4)
+    chunks = [{"url": f"u{i}", "slice": [{"dim": "y", "start": 0, "stop": 1}]} for i in range(5)]
+    blocks = [(rng.random((3, 4)).astype(np.float32), rng.integers(0, 99, (3, 4))) for _ in chunks]
+    numpy_heap, torch_heap = NumpyResultHeap(3, 4), TorchResultHeap(3, 4, torch, "cpu")
+    for chunk, (distances, offsets) in zip(chunks, blocks, strict=True):
+        order = np.argsort(distances, axis=1)
+        distances = np.take_along_axis(distances, order, 1)
+        offsets = np.take_along_axis(offsets, order, 1)
+        numpy_heap.add_result_subset(np.arange(3), distances, chunk, offsets)  # type: ignore[arg-type]
+        torch_heap.add_device(
+            np.ones(3, bool),
+            torch.from_numpy(distances),
+            torch.from_numpy(offsets),
+            chunk,  # type: ignore[arg-type]
+        )
+    merged = TorchResultHeap(3, 4, torch, "cpu")
+    merged.add_results(torch_heap.drain())
+
+    def ranked(results: object) -> list[tuple[int, float]]:
+        return sorted(zip(results.query_ids, results.distances, strict=True))  # type: ignore[attr-defined]
+
+    assert ranked(merged.results()) == pytest.approx(ranked(numpy_heap.results()))
+    np.testing.assert_allclose(merged.tau, numpy_heap.tau)

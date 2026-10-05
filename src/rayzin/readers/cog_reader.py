@@ -38,6 +38,10 @@ class CogLayout:
     epsg: int | None
 
     @property
+    def block_nbytes(self) -> int:
+        return self.block_height * self.block_width * self.bands * self.dtype.itemsize
+
+    @property
     def blocks_down(self) -> int:
         return -(-self.height // self.block_height)
 
@@ -118,6 +122,15 @@ class CogVectorReader:
 
     async def layout(self, url: str) -> CogLayout:
         return (await self._open(url))[1]
+
+    async def fetch_compressed(
+        self, url: str, y0: int, x0: int
+    ) -> tuple[CogLayout, int, int, memoryview]:
+        """The still-compressed block at pixel origin ``(y0, x0)``: layout, row, column, bytes."""
+        tiff, layout = await self._open(url)
+        row, column = y0 // layout.block_height, x0 // layout.block_width
+        [tile] = await tiff.fetch_tiles([(column, row)], 0)
+        return layout, row, column, memoryview(tile.compressed_bytes)
 
     async def fetch_blocks(self, origins: Sequence[tuple[str, int, int]]) -> list[Block]:
         """Fetch and decode the blocks at ``(url, y0, x0)`` pixel origins, one batch per file."""
@@ -232,23 +245,9 @@ def cog_layout(ifd: Any) -> CogLayout:
 
 def decode_block(data: memoryview | bytes, layout: CogLayout) -> np.ndarray:
     """Decode one block to ``(block_height, block_width, bands)``."""
-    size = layout.block_height * layout.block_width * layout.bands * layout.dtype.itemsize
-    if layout.compression == ZSTD:
-        import zstandard
-
-        raw: memoryview | bytes = zstandard.ZstdDecompressor().decompress(
-            data, max_output_size=size
-        )
-    elif layout.compression in DEFLATE:
-        raw = zlib.decompress(data)
-    elif layout.compression == NO_COMPRESSION:
-        raw = data
-    else:
-        msg = f"COG compression {layout.compression} is not supported."
-        raise NotImplementedError(msg)
-    return np.frombuffer(raw, dtype=layout.dtype).reshape(
-        layout.block_height, layout.block_width, layout.bands
-    )
+    out = np.empty(layout.block_nbytes, dtype=np.uint8)
+    decode_block_into(data, layout, out)
+    return out.view(layout.dtype).reshape(layout.block_height, layout.block_width, layout.bands)
 
 
 def block_slice(layout: CogLayout, row: int, column: int) -> list[dict[str, Any]]:
@@ -275,8 +274,7 @@ class RawBlock:
 
     @property
     def nbytes(self) -> int:
-        layout = self.layout
-        return layout.block_height * layout.block_width * layout.bands * layout.dtype.itemsize
+        return self.layout.block_nbytes
 
 
 class RawBlockStream:
@@ -332,12 +330,9 @@ class RawBlockStream:
     async def _fetch(self, key: Any, url: str, y0: int, x0: int) -> None:
         await self._gate.acquire()
         try:
-            tiff, layout = await self._reader._open(url)
-            row, column = y0 // layout.block_height, x0 // layout.block_width
-            [tile] = await tiff.fetch_tiles([(column, row)], 0)
-            data = memoryview(tile.compressed_bytes)
-        except BaseException as error:
-            self._loop.call_soon(self._gate.release)
+            layout, row, column, data = await self._reader.fetch_compressed(url, y0, x0)
+        except Exception as error:
+            self._gate.release()
             self._ready.put((key, None, error))
             return
         self._pool.submit(self._decode, key, layout, row, column, data)
@@ -345,12 +340,11 @@ class RawBlockStream:
     def _decode(self, key: Any, layout: CogLayout, row: int, column: int, data: memoryview) -> None:
         slot = self._free.get()
         try:
-            nbytes = layout.block_height * layout.block_width * layout.bands * layout.dtype.itemsize
-            if slot is None or slot[1].nbytes < nbytes:
-                slot = self._allocate(nbytes)
-            decode_block_into(data, layout, slot[1][:nbytes])
+            if slot is None or slot[1].nbytes < layout.block_nbytes:
+                slot = self._allocate(layout.block_nbytes)
+            decode_block_into(data, layout, slot[1][: layout.block_nbytes])
             self._ready.put((key, RawBlock(slot, layout, row, column), None))
-        except BaseException as error:
+        except Exception as error:
             self._free.put(slot)
             self._ready.put((key, None, error))
         finally:

@@ -106,10 +106,7 @@ def knn_cog_search(
     e.g. blocks too large for a tight radius, or so many that computing bounds costs more than it
     saves. The result is the same exact top ``k``.
     """
-    queries = _as_query_batch(query)
-    if normalize:
-        norms = np.linalg.norm(queries, axis=1, keepdims=True)
-        queries = (queries / np.maximum(norms, 1e-12)).astype(np.float32)
+    queries = unit_rows(_as_query_batch(query)) if normalize else _as_query_batch(query)
     return _knn_search(
         manifest_path,
         queries,
@@ -164,10 +161,7 @@ def knn_parquet_search(
     single rows as they are read, e.g. ``pc.field("score") > 0.1``. A result's offset is its
     row within its row group. The other arguments mean what they do for ``knn_cog_search``.
     """
-    queries = _as_query_batch(query)
-    if normalize:
-        norms = np.linalg.norm(queries, axis=1, keepdims=True)
-        queries = (queries / np.maximum(norms, 1e-12)).astype(np.float32)
+    queries = unit_rows(_as_query_batch(query)) if normalize else _as_query_batch(query)
     return _knn_search(
         manifest_path,
         queries,
@@ -466,6 +460,12 @@ def manifest_urls(path: str, filesystem: Any = None) -> set[str]:
         return set()
     table = ds.dataset(root, filesystem=filesystem, format="parquet").to_table(columns=[COL_URL])
     return set(table.column(COL_URL).unique().to_pylist())
+
+
+def unit_rows(vectors: Float32Array) -> Float32Array:
+    """Each row scaled to unit length, as manifests built with ``normalize`` store vectors."""
+    norms = np.linalg.norm(vectors, axis=1, keepdims=True)
+    return (vectors / np.maximum(norms, 1e-12)).astype(np.float32)
 
 
 def _as_query_batch(query: np.ndarray) -> Float32Array:

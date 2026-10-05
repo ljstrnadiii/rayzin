@@ -1,3 +1,4 @@
+from functools import cache
 from typing import Any
 
 import faiss  # type: ignore[import-untyped,unused-ignore]
@@ -244,7 +245,9 @@ class FaissSearchBackend:
         return flat_distances, np.asarray(indices, dtype=np.int64)
 
 
-_GPU_RESOURCES: Any = None
+@cache
+def _gpu_resources() -> Any:
+    return faiss.StandardGpuResources()
 
 
 def _build_index(
@@ -263,10 +266,7 @@ def _build_index(
     if not hasattr(faiss, "StandardGpuResources"):
         msg = "This FAISS build does not include GPU support."
         raise NotImplementedError(msg)
-    global _GPU_RESOURCES
-    if _GPU_RESOURCES is None:
-        _GPU_RESOURCES = faiss.StandardGpuResources()
-    return faiss.index_cpu_to_gpu(_GPU_RESOURCES, 0, index)
+    return faiss.index_cpu_to_gpu(_gpu_resources(), 0, index)
 
 
 def _prepare_inputs(

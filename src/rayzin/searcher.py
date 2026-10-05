@@ -11,7 +11,8 @@ from shapely.geometry.base import BaseGeometry  # type: ignore[import-untyped]
 
 from rayzin.enums import MetricType, ReaderType, SearchBackendType
 from rayzin.manifest.filtering import rows_intersecting
-from rayzin.metrics import _add_lower_bounds
+from rayzin.metrics import add_lower_bounds_fn
+from rayzin.pipeline import unit_rows
 from rayzin.search.block_searcher import BlockSearcher
 from rayzin.search.heap_actor import HeapActor
 from rayzin.types import COL_CENTROID, COL_COUNT, COL_RADIUS, SearchResults
@@ -72,7 +73,7 @@ class ShardSearcher:
         if aoi is not None:
             table = rows_intersecting(table, aoi)
         if self._prune:
-            table = _add_lower_bounds(table, queries, self._metric)
+            table = add_lower_bounds_fn(table, queries, self._metric)
         prepared = time.perf_counter()
         self._searcher.reset(queries, k, heap_actor)
         summary = self._searcher(table).to_pylist()[0]
@@ -166,8 +167,7 @@ class KnnSearcher:
             msg = f"Expected query to have shape (nq, d), got {queries.shape!r}."
             raise ValueError(msg)
         if self._normalize:
-            norms = np.linalg.norm(queries, axis=1, keepdims=True)
-            queries = (queries / np.maximum(norms, 1e-12)).astype(np.float32)
+            queries = unit_rows(queries)
         ray.get(self._heap.reset.remote(len(queries), k))
         shared = ray.put(queries)
         summaries = ray.get(

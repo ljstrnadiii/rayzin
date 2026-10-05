@@ -2,8 +2,9 @@
 [![CI](https://github.com/ljstrnadiii/rayzin/actions/workflows/ci.yml/badge.svg?branch=main)](https://github.com/ljstrnadiii/rayzin/actions/workflows/ci.yml)
 [![Release](https://github.com/ljstrnadiii/rayzin/actions/workflows/release.yml/badge.svg?branch=main)](https://github.com/ljstrnadiii/rayzin/actions/workflows/release.yml)
 
-`rayzin` is a Ray project for exact k-nearest-neighbor search over chunked embedding arrays stored
-in Zarr.
+`rayzin` is a Ray project for exact k-nearest-neighbor search over chunked embeddings: Zarr
+arrays, Cloud-Optimised GeoTIFFs whose bands are the embedding, and Parquet files with one vector
+per row.
 
 It is designed for workflows where:
 - Embeddings are stored as chunked arrays, typically with a trailing feature dimension.
@@ -26,16 +27,23 @@ fits naturally into Ray Data execution.
   vectors, which is the main lever for scaling exact search.
 - **Ray-native distributed execution:** Manifest filtering, chunk reads, and search fan out through
   Ray Data while final top-k merging stays centralized in a heap actor.
-- **Pluggable search backends:** NumPy and FAISS backends share the same pipeline so pruning and
-  result handling stay consistent across implementations.
+- **Pluggable search backends:** NumPy, FAISS and torch backends share the same pipeline so
+  pruning and result handling stay consistent across implementations.
+- **GPU streaming:** with the torch backend, COG blocks stream to the GPU in their stored dtype
+  (e.g. float16) from pinned buffers, and the top-k stays on the device.
 
 ## Current Scope
 
-- Zarr-backed search path.
-- Batched query input shaped `(1, d)` or `(nq, d)`.
-- Euclidean pruning path.
-- NumPy backend by default, with FAISS supported when installed separately.
-- Early COG entry points are present, but the COG path is not the main supported flow yet.
+- Zarr: `build_manifest_from_zarr`, `knn_zarr_search`.
+- COGs: `build_manifest_from_cogs`, `knn_cog_search`. A chunk is one internal COG block of a
+  pixel-interleaved, float, unpredicted COG (zstd, deflate or none).
+- Parquet: `build_manifest_from_parquet`, `knn_parquet_search`. A chunk is one row group of a
+  fixed-size list column; `row_filter` drops single rows, e.g. by score.
+- COG and Parquet manifests are built incrementally (only files they lack), carry a lon/lat
+  footprint per chunk for `aoi`, and take extra metadata columns for `filter_expr`.
+- `KnnSearcher` keeps a manifest, its actors and their GPU state loaded across searches.
+- Batched query input shaped `(1, d)` or `(nq, d)`, and the Euclidean pruning path, which
+  `prune=False` turns off when chunk bounds cannot rule anything out.
 
 ## Installation
 
@@ -45,16 +53,15 @@ Install the base package from PyPI:
 pip install rayzin
 ```
 
-That gives you the core Zarr search path and the NumPy backend.
-
-If you want the FAISS backend, install FAISS separately after installing `rayzin`:
+That gives you the core Zarr search path and the NumPy backend. Extras add the rest:
 
 ```bash
-pip install faiss-cpu
+pip install "rayzin[cog,torch]"
 ```
 
-For FAISS GPU, use your platform's recommended FAISS installation method. In practice that is
-often conda or Pixi on `linux-64`.
+- `cog`: the COG reader (async-tiff, zstandard, pyproj).
+- `cpu` or `gpu`: the FAISS backend, `faiss-cpu` or `faiss-gpu` (CUDA 12 wheels).
+- `torch`: the torch backend, on the GPU when there is one.
 
 If you are working from a local checkout and want an editable install:
 

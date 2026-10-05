@@ -12,7 +12,7 @@ NODATA_DISTANCE = 1e6
 class TorchSearchBackend:
     """Exact squared-L2 search with torch, on the GPU when there is one.
 
-    ``search_raw`` takes a block still in its stored dtype, e.g. float16, from a pinned host
+    ``search_raw_device`` takes a block still in its stored dtype, e.g. float16, from a pinned host
     buffer: it is copied to the device asynchronously and cropped, masked, normalized, scored
     and reduced to the top ``k`` there, so the host only decompresses. Cells with a non-finite
     value score ``NODATA_DISTANCE``.
@@ -27,7 +27,7 @@ class TorchSearchBackend:
         self._torch = torch
         self._device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
         self._normalize = normalize
-        self._queries: tuple[int, Any, Any] | None = None
+        self._queries: tuple[Float32Array, Any] | None = None
 
     def create_heap(self, nq: int, k: int) -> "TorchResultHeap":
         return TorchResultHeap(nq, k, self._torch, self._device)
@@ -42,12 +42,7 @@ class TorchSearchBackend:
         self, vectors: Float32Array, queries: Float32Array, k: int
     ) -> tuple[Float32Array, Int64Array]:
         x = self._torch.from_numpy(np.ascontiguousarray(vectors, np.float32)).to(self._device)
-        return self._top_k(x, queries, k)
-
-    def search_raw(
-        self, block: RawBlock, queries: Float32Array, k: int
-    ) -> tuple[Float32Array, Int64Array]:
-        distances, indices = self.search_raw_device(block, queries, k)
+        distances, indices = self._top_k(x, queries, k)
         return _host(distances, np.float32), _host(indices, np.int64)
 
     def search_raw_device(self, block: RawBlock, queries: Float32Array, k: int) -> tuple[Any, Any]:
@@ -62,7 +57,7 @@ class TorchSearchBackend:
             .reshape(-1, layout.bands)
             .float()
         )
-        return self._top_k_device(cells, queries, k)
+        return self._top_k(cells, queries, k)
 
     def radius_search(
         self, vectors: Float32Array, query: Float32Array, radius: float
@@ -71,11 +66,7 @@ class TorchSearchBackend:
         keep = distances[0] <= radius
         return distances[0][keep], indices[0][keep]
 
-    def _top_k(self, x: Any, queries: Float32Array, k: int) -> tuple[Float32Array, Int64Array]:
-        distances, indices = self._top_k_device(x, queries, k)
-        return _host(distances, np.float32), _host(indices, np.int64)
-
-    def _top_k_device(self, x: Any, queries: Float32Array, k: int) -> tuple[Any, Any]:
+    def _top_k(self, x: Any, queries: Float32Array, k: int) -> tuple[Any, Any]:
         torch = self._torch
         q = self._device_queries(queries)
         valid = torch.isfinite(x).all(dim=1)
@@ -88,11 +79,10 @@ class TorchSearchBackend:
         return distances.T, indices.T
 
     def _device_queries(self, queries: Float32Array) -> Any:
-        key = id(queries)
-        if self._queries is None or self._queries[0] != key or self._queries[1] is not queries:
+        if self._queries is None or self._queries[0] is not queries:
             tensor = self._torch.from_numpy(np.ascontiguousarray(queries, np.float32))
-            self._queries = (key, queries, tensor.to(self._device))
-        return self._queries[2]
+            self._queries = (queries, tensor.to(self._device))
+        return self._queries[1]
 
 
 def _host(tensor: Any, dtype: type) -> Any:

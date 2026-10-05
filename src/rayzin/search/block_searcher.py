@@ -1,4 +1,5 @@
 from collections.abc import Iterator
+from itertools import islice
 from typing import Any
 
 import numpy as np
@@ -92,38 +93,28 @@ class BlockSearcher:
                 raise ValueError(msg)
 
         vectors_searched = 0
-        device_heap = self._streams() and hasattr(self.heap, "add_device")
         reads = self._streamed(rows) if self._streams() else self._grouped(rows)
         for row, payload in reads:
-            try:
-                effective_tau = np.minimum(self.heap.tau, self.global_tau)
-                active_mask = np.asarray(row[COL_LOWER_BOUNDS] < effective_tau, dtype=bool)
-                if not np.any(active_mask):
-                    continue
-                rows_searched += 1
-                vectors_searched += row[COL_COUNT]
-                active_query_ids = np.asarray(np.flatnonzero(active_mask), dtype=np.int64)
-                query_evaluations += int(len(active_query_ids))
-                chunk_ref = _chunk_ref(_chunk_record(row))
-                if device_heap:
-                    distances, local_indices = self.backend.search_raw_device(  # type: ignore[attr-defined]
-                        payload, self.queries, self.k
-                    )
-                    self.heap.add_device(active_mask, distances, local_indices, chunk_ref)  # type: ignore[attr-defined]
-                    continue
-                distances, local_indices = self._score(payload, active_mask)
-            finally:
-                if self._stream is not None and not isinstance(payload, tuple):
-                    self._stream.release(payload)
-            new_results = self.heap.add_result_subset(
-                active_query_ids,
-                distances,
-                chunk_ref,
-                local_indices,
-            )
-            if not new_results.query_ids:
+            effective_tau = np.minimum(self.heap.tau, self.global_tau)
+            active_mask = np.asarray(row[COL_LOWER_BOUNDS] < effective_tau, dtype=bool)
+            if not np.any(active_mask):
                 continue
-
+            rows_searched += 1
+            vectors_searched += row[COL_COUNT]
+            active_query_ids = np.asarray(np.flatnonzero(active_mask), dtype=np.int64)
+            query_evaluations += int(len(active_query_ids))
+            chunk_ref = _chunk_ref(_chunk_record(row))
+            if self._streams():
+                distances, offsets = self.backend.search_raw_device(  # type: ignore[attr-defined]
+                    payload, self.queries, self.k
+                )
+                self.heap.add_device(active_mask, distances, offsets, chunk_ref)  # type: ignore[attr-defined]
+                continue
+            vectors, _shape = payload
+            distances, offsets = self.backend.search(vectors, self.queries[active_mask], self.k)
+            new_results = self.heap.add_result_subset(
+                active_query_ids, distances, chunk_ref, offsets
+            )
             added_query_ids.extend(new_results.query_ids)
             added_chunks.extend(new_results.chunks)
             added_offsets.extend(new_results.offsets)
@@ -165,23 +156,33 @@ class BlockSearcher:
         )
 
     def _streams(self) -> bool:
+        """Whether blocks stream to the device: COG blocks, and a backend that scores them raw."""
         from rayzin.readers.cog_reader import CogVectorReader
 
-        return hasattr(self.backend, "search_raw") and isinstance(self.reader, CogVectorReader)
+        return hasattr(self.backend, "search_raw_device") and isinstance(
+            self.reader, CogVectorReader
+        )
+
+    def _candidates(self, rows: list[LowerBoundRow]) -> Iterator[LowerBoundRow]:
+        """Rows, in bound order, that the bounds known when each is reached cannot rule out."""
+        for row in rows:
+            effective_tau = np.minimum(self.heap.tau, self.global_tau)
+            if row[COL_MIN_LOWER_BOUND] >= float(np.max(effective_tau)):
+                return
+            if np.any(row[COL_LOWER_BOUNDS] < effective_tau):
+                yield row
 
     def _grouped(self, rows: list[LowerBoundRow]) -> Iterator[tuple[LowerBoundRow, Any]]:
-        position = 0
-        while True:
-            group, position = self._next_group(rows, position)
-            if not group:
-                return
+        """Read ``prefetch`` candidates at a time, then hand them over one by one."""
+        candidates = self._candidates(rows)
+        while group := list(islice(candidates, self.prefetch)):
             chunks = [_chunk_record(row) for row in group]
             read_many = getattr(self.reader, "read_many", None)
             fetched = read_many(chunks) if read_many else [self.reader.read(c) for c in chunks]
             yield from zip(group, fetched, strict=True)
 
     def _streamed(self, rows: list[LowerBoundRow]) -> Iterator[tuple[LowerBoundRow, Any]]:
-        """Keep ``prefetch`` blocks fetching and decoding while earlier ones are scored."""
+        """Keep ``prefetch`` candidates fetching and decoding while earlier ones are scored."""
         if self._stream is None:
             from rayzin.readers.cog_reader import RawBlockStream
 
@@ -192,48 +193,20 @@ class BlockSearcher:
                 threads=self.reader.decode_threads,  # type: ignore[attr-defined]
             )
         stream = self._stream
+        candidates = self._candidates(rows)
         waiting: dict[int, LowerBoundRow] = {}
-        position = 0
+        submitted = 0
         while True:
-            while stream.pending < self.prefetch and position < len(rows):
-                row = rows[position]
-                effective_tau = np.minimum(self.heap.tau, self.global_tau)
-                if row[COL_MIN_LOWER_BOUND] >= float(np.max(effective_tau)):
-                    position = len(rows)
-                    break
-                position += 1
-                if np.any(row[COL_LOWER_BOUNDS] < effective_tau):
-                    waiting[position] = row
-                    origin = {part[COL_DIM]: part[COL_START] for part in row[COL_SLICE]}
-                    stream.submit(position, row[COL_URL], origin["y"], origin["x"])
+            while stream.pending < self.prefetch and (row := next(candidates, None)) is not None:
+                waiting[submitted] = row
+                origin = {part[COL_DIM]: part[COL_START] for part in row[COL_SLICE]}
+                stream.submit(submitted, row[COL_URL], origin["y"], origin["x"])
+                submitted += 1
             if not stream.pending:
                 return
-            key, block = stream.next()
-            yield waiting.pop(key), block
-
-    def _score(self, payload: Any, active_mask: np.ndarray) -> tuple[Float32Array, Any]:
-        if isinstance(payload, tuple):
-            vectors, _shape = payload
-            return self.backend.search(vectors, self.queries[active_mask], self.k)
-        distances, indices = self.backend.search_raw(  # type: ignore[attr-defined]
-            payload, self.queries, self.k
-        )
-        return distances[active_mask], indices[active_mask]
-
-    def _next_group(
-        self, rows: list[LowerBoundRow], position: int
-    ) -> tuple[list[LowerBoundRow], int]:
-        """Up to ``prefetch`` rows from ``position`` that the current bounds cannot rule out."""
-        group: list[LowerBoundRow] = []
-        effective_tau = np.minimum(self.heap.tau, self.global_tau)
-        while position < len(rows) and len(group) < self.prefetch:
-            row = rows[position]
-            if row[COL_MIN_LOWER_BOUND] >= float(np.max(effective_tau)):
-                return group, len(rows)
-            position += 1
-            if np.any(row[COL_LOWER_BOUNDS] < effective_tau):
-                group.append(row)
-        return group, position
+            done, block = stream.next()
+            yield waiting.pop(done), block
+            stream.release(block)
 
     def _refresh_global_tau(self) -> None:
         remote_tau = np.asarray(ray.get(self.heap_actor.tau.remote()), dtype=np.float32)
