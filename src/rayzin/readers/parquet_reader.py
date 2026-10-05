@@ -65,7 +65,7 @@ class ParquetVectorReader:
         self._row_filter = row_filter
         self._filter_columns = list(row_filter_columns)
         self._stores: dict[str, Any] = {}
-        self._files: dict[str, pq.ParquetFile] = {}
+        self._footers: dict[str, pq.FileMetaData] = {}
         self._pool = ThreadPoolExecutor(threads)
 
     def read(self, chunk: ChunkRecord) -> tuple[Float32Array, tuple[int, ...]]:
@@ -83,7 +83,7 @@ class ParquetVectorReader:
         return list(self._pool.map(one, chunks))
 
     def row_groups(self, url: str) -> int:
-        return int(self._file(url).metadata.num_row_groups)
+        return int(self._footer(url).num_row_groups)
 
     def read_row_group(self, url: str, group: int) -> tuple[Float32Array, np.ndarray]:
         """Unit vectors of one row group and which rows hold a valid, unfiltered vector."""
@@ -105,27 +105,39 @@ class ParquetVectorReader:
             np.divide(vectors, np.maximum(norms, 1e-12), out=vectors, where=valid[:, None])
         return vectors, valid
 
-    def read_rows(self, url: str, group: int, rows: Sequence[int], columns: Sequence[str]) -> pa.Table:
+    def read_rows(
+        self, url: str, group: int, rows: Sequence[int], columns: Sequence[str]
+    ) -> pa.Table:
         """Other columns of some rows of a row group, e.g. a hit's geometry and score."""
         table = self._file(url).read_row_group(group, columns=list(columns))
         return table.take(pa.array(list(rows), type=pa.int64()))
 
     def _file(self, url: str) -> pq.ParquetFile:
-        if url not in self._files:
-            import obstore
-            from obstore.store import LocalStore, from_url
+        """A handle of its own for each read; one file object read from several threads at once
+        crashes pyarrow. The footer is read once per file and reused."""
+        import obstore
+        from obstore.store import LocalStore, from_url
 
-            parsed = urlparse(url)
-            if parsed.scheme in ("", "file"):
-                root, path = "/", parsed.path.lstrip("/")
-                store = self._stores.setdefault(root, LocalStore("/"))
-            else:
-                root, path = f"{parsed.scheme}://{parsed.netloc}", parsed.path.lstrip("/")
-                if root not in self._stores:
-                    self._stores[root] = from_url(root, **self._store_kwargs)
-                store = self._stores[root]
-            self._files[url] = pq.ParquetFile(ObjectFile(obstore.open_reader(store, path)))
-        return self._files[url]
+        parsed = urlparse(url)
+        if parsed.scheme in ("", "file"):
+            root, path = "/", parsed.path.lstrip("/")
+            store = self._stores.setdefault(root, LocalStore("/"))
+        else:
+            root, path = f"{parsed.scheme}://{parsed.netloc}", parsed.path.lstrip("/")
+            if root not in self._stores:
+                self._stores[root] = from_url(root, **self._store_kwargs)
+            store = self._stores[root]
+        handle = ObjectFile(obstore.open_reader(store, path))
+        footer = self._footers.get(url)
+        file = pq.ParquetFile(handle, metadata=footer)
+        if footer is None:
+            self._footers[url] = file.metadata
+        return file
+
+    def _footer(self, url: str) -> pq.FileMetaData:
+        if url not in self._footers:
+            self._file(url)
+        return self._footers[url]
 
 
 def row_group_slice(group: int) -> list[dict[str, Any]]:

@@ -16,7 +16,10 @@ PLANTED = (1, 3)
 
 
 def write_boxes(path: Path, vectors: np.ndarray, scores: np.ndarray, x0: float) -> str:
-    boxes = [shapely.box(x0 + i * 0.001, 52.0, x0 + i * 0.001 + 0.0005, 52.0005) for i in range(len(vectors))]
+    boxes = [
+        shapely.box(x0 + i * 0.001, 52.0, x0 + i * 0.001 + 0.0005, 52.0005)
+        for i in range(len(vectors))
+    ]
     table = pa.table(
         {
             "geometry": pa.array(shapely.to_wkb(boxes), pa.binary()),
@@ -139,4 +142,31 @@ def test_a_searcher_over_parquet_answers_like_a_one_shot_search(
 
     assert sorted(zip(warm.offsets, warm.distances)) == pytest.approx(
         sorted(zip(one_shot.offsets, one_shot.distances))
+    )
+
+
+def test_reading_many_row_groups_of_one_file_at_once_is_safe(
+    tmp_path: Path, boxes: tuple[list[str], np.ndarray]
+) -> None:
+    from rayzin.readers.parquet_reader import ParquetVectorReader, row_group_slice
+
+    vectors = np.random.default_rng(9).normal(size=(ROWS * 64, DIM)).astype(np.float32)
+    url = write_boxes(tmp_path / "many.parquet", vectors, np.full(len(vectors), 0.9), 4.0)
+    reader = ParquetVectorReader(normalize=False, threads=16)
+    chunks = [
+        {
+            "url": url,
+            "slice": row_group_slice(group),
+            "count": ROWS,
+            "centroid": None,
+            "radius": 0.0,
+        }
+        for group in range(64)
+    ] * 4
+
+    read = reader.read_many(chunks)  # type: ignore[arg-type]
+
+    np.testing.assert_allclose(
+        np.concatenate([vectors for vectors, _ in read[:64]]),
+        vectors.astype(np.float16).astype(np.float32),
     )
