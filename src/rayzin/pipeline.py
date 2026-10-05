@@ -85,6 +85,9 @@ def knn_cog_search(
     ``decode_threads`` decompress straight into pinned buffers, and the GPU does the rest; give
     each actor a GPU with ``num_gpus_per_actor``, as for ``FAISS_GPU``. ``filesystem``, a
     ``pyarrow.fs.FileSystem``, reads the manifest, with ``manifest_path`` relative to it.
+
+    Without a ``batch_size``, the blocks that survive pushdown are split evenly, one share per
+    actor, so every actor works however few blocks remain and none waits on a straggler batch.
     """
     queries = _as_query_batch(query)
     if normalize:
@@ -144,22 +147,24 @@ def _knn_search(
         backend_type=backend.value,
     )
 
+    bounded = filter_manifest(
+        ray.data.read_parquet(manifest_path, filesystem=filesystem).filter(expr=col(COL_COUNT) > 0),
+        filter_expr=filter_expr,
+        aoi=aoi,
+        store_kwargs=store_kwargs,
+    ).map_batches(
+        add_lower_bounds_fn,  # type: ignore[arg-type]
+        fn_kwargs={"queries": query, "metric_type": metric.value},
+        batch_format="pyarrow",
+        udf_modifying_row_count=False,
+    )
+    if batch_size is None:
+        bounded = bounded.materialize()
+        actor_pool_size = max(1, min(actor_pool_size, bounded.count()))
+        bounded = bounded.repartition(actor_pool_size)
+
     summary = (
-        filter_manifest(
-            ray.data.read_parquet(manifest_path, filesystem=filesystem).filter(
-                expr=col(COL_COUNT) > 0
-            ),
-            filter_expr=filter_expr,
-            aoi=aoi,
-            store_kwargs=store_kwargs,
-        )
-        .map_batches(
-            add_lower_bounds_fn,  # type: ignore[arg-type]
-            fn_kwargs={"queries": query, "metric_type": metric.value},
-            batch_format="pyarrow",
-            udf_modifying_row_count=False,
-        )
-        .map_batches(
+        bounded.map_batches(
             BlockSearcher,
             fn_constructor_kwargs={
                 "queries": query,
