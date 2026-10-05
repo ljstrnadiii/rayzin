@@ -50,17 +50,21 @@ class BlockSearcher:
     ) -> None:
         metric = MetricType(metric_type)
         self.prefetch = max(1, prefetch)
+        self.reader = make_reader(ReaderType(reader_type), **reader_kwargs)
+        self.backend = make_search_backend(
+            SearchBackendType(backend_type), metric, normalize=reader_kwargs.get("normalize", True)
+        )
+        self._stream: Any = None
+        self.reset(queries, k, heap_actor)
+
+    def reset(self, queries: Float32Array, k: int, heap_actor: Any) -> None:
+        """Take a new query batch, keeping the reader, backend and block stream warm."""
         self.queries = np.asarray(queries, dtype=np.float32)
         if self.queries.ndim != 2:
             msg = f"Expected queries to have shape (nq, d), got {self.queries.shape!r}."
             raise ValueError(msg)
         self.nq = self.queries.shape[0]
         self.k = k
-        self.reader = make_reader(ReaderType(reader_type), **reader_kwargs)
-        self.backend = make_search_backend(
-            SearchBackendType(backend_type), metric, normalize=reader_kwargs.get("normalize", True)
-        )
-        self._stream: Any = None
         self.heap = self.backend.create_heap(self.nq, self.k)
         self.heap_actor = heap_actor
         self.global_tau = np.full(self.nq, float("inf"), dtype=np.float32)

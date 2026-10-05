@@ -191,3 +191,29 @@ def test_without_pruning_the_search_skips_bounds_and_returns_the_same_neighbours
         zip(pruned.query_ids, pruned.offsets)
     )
     assert exhaustive.stats["blocks_searched"] == 3 * (SIDE // BLOCK) ** 2
+
+
+def test_a_searcher_answers_repeated_and_filtered_searches_like_a_one_shot_search(
+    manifest: str, cogs: tuple[list[str], np.ndarray]
+) -> None:
+    import pyarrow.compute as pc  # type: ignore[import-untyped]
+
+    from rayzin.enums import SearchBackendType
+    from rayzin.searcher import CogSearcher
+
+    urls, target = cogs
+    queries = np.stack([target, np.random.default_rng(7).normal(size=BANDS).astype(np.float32)])
+    one_shot = knn_cog_search(manifest, queries, k=5)
+    searcher = CogSearcher(manifest, actors=1, backend=SearchBackendType.NUMPY)
+    try:
+        first = searcher.search(queries, k=5)
+        again = searcher.search(queries, k=5)
+        filtered = searcher.search(queries, k=5, filter_expr=pc.field("year") < 2026)
+    finally:
+        searcher.close()
+
+    expected = sorted(zip(one_shot.query_ids, one_shot.offsets))
+    assert sorted(zip(first.query_ids, first.offsets)) == expected
+    assert sorted(zip(again.query_ids, again.offsets)) == expected
+    assert urls[2] not in {chunk["url"] for chunk in filtered.chunks}
+    assert filtered.stats["blocks_after_pushdown"] == 2 * (SIDE // BLOCK) ** 2

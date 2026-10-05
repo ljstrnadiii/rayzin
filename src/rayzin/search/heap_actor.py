@@ -12,7 +12,12 @@ class HeapActor:
             SearchBackendType(backend_type),
             MetricType(metric_type),
         )
+        self._backend = backend
         self._heap = backend.create_heap(nq, k)
+
+    def reset(self, nq: int, k: int) -> None:
+        """Start a new search on the same actor."""
+        self._heap = self._backend.create_heap(nq, k)
 
     def add_results(self, results: SearchResults) -> Float32Array:
         self._heap.add_results(results)
