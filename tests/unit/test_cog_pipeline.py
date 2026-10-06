@@ -222,7 +222,8 @@ def test_a_searcher_answers_repeated_and_filtered_searches_like_a_one_shot_searc
 def test_a_block_stream_decodes_every_block_like_the_reader_with_few_buffers(
     cogs: tuple[list[str], np.ndarray],
 ) -> None:
-    from rayzin.readers.cog_reader import RawBlockStream
+    from rayzin.readers.cog_reader import block_slice
+    from rayzin.readers.stream import RawBlockStream
 
     urls, _ = cogs
     reader = CogVectorReader(normalize=False)
@@ -236,13 +237,14 @@ def test_a_block_stream_decodes_every_block_like_the_reader_with_few_buffers(
     stream = RawBlockStream(reader, allocate, in_flight=2, threads=1)
     seen = {}
     try:
-        for key, origin in enumerate(origins):
-            stream.submit(key, *origin)
+        for key, block in enumerate(expected):
+            chunk = {"url": block.url, "slice": block_slice(block.layout, block.row, block.column)}
+            stream.submit(key, chunk)  # type: ignore[arg-type]
         while stream.pending:
-            key, block = stream.next()
-            pixels = block.slot[1][: block.nbytes].view(block.layout.dtype)
+            key, raw = stream.next()
+            pixels = raw.slot[1][: raw.nbytes].view(raw.dtype)
             seen[key] = pixels.reshape(-1, BANDS).astype(np.float32)
-            stream.release(block)
+            stream.release(raw)
     finally:
         stream.close()
 

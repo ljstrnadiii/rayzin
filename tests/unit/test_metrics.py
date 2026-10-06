@@ -107,3 +107,12 @@ def test_cosine_pairwise_matches_faiss_inner_product(cosine_metric: CosineMetric
     expected[indices[0]] = 1.0 - scores[0]
 
     np.testing.assert_allclose(pairwise, expected, atol=1e-6)
+
+
+def test_a_batch_a_filter_emptied_gets_no_bounds() -> None:
+    queries = np.ones((3, 4), dtype=np.float32)
+
+    bounded = add_lower_bounds_fn(MANIFEST_SCHEMA.empty_table(), queries, "euclidean")
+
+    assert bounded.num_rows == 0
+    assert COL_LOWER_BOUNDS in bounded.column_names

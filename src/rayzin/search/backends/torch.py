@@ -3,7 +3,7 @@ from typing import Any
 import numpy as np
 
 from rayzin.enums import MetricType
-from rayzin.readers.cog_reader import RawBlock
+from rayzin.readers.stream import RawBlock
 from rayzin.types import ChunkRef, Float32Array, Int64Array, SearchResults
 
 NODATA_DISTANCE = 1e6
@@ -47,14 +47,12 @@ class TorchSearchBackend:
 
     def search_raw_device(self, block: RawBlock, queries: Float32Array, k: int) -> tuple[Any, Any]:
         """``(nq, kk)`` distances and offsets of a raw block's top ``k``, left on the device."""
-        torch = self._torch
-        layout = block.layout
-        y0, y1, x0, x1 = layout.window(block.row, block.column)
+        rows, columns = block.window
         raw = block.slot[0][: block.nbytes].to(self._device, non_blocking=True)
         cells = (
-            raw.view(_torch_dtype(torch, layout.dtype))
-            .view(layout.block_height, layout.block_width, layout.bands)[: y1 - y0, : x1 - x0]
-            .reshape(-1, layout.bands)
+            raw.view(_torch_dtype(self._torch, block.dtype))
+            .view(block.shape)[:rows, :columns]
+            .reshape(-1, block.shape[2])
             .float()
         )
         return self._top_k(cells, queries, k)

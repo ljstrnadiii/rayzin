@@ -170,3 +170,62 @@ def test_reading_many_row_groups_of_one_file_at_once_is_safe(
         np.concatenate([vectors for vectors, _ in read[:64]]),
         vectors.astype(np.float16).astype(np.float32),
     )
+
+
+def test_streamed_row_groups_decode_like_read_row_groups_with_filtered_rows_as_nan(
+    boxes: tuple[list[str], np.ndarray],
+) -> None:
+    from rayzin.readers.parquet_reader import ParquetVectorReader, row_group_slice
+    from rayzin.readers.stream import RawBlockStream
+
+    urls, _ = boxes
+    reader = ParquetVectorReader(
+        normalize=False, row_filter=pc.field("score") > 0.5, row_filter_columns=("score",)
+    )
+    groups = [(url, group) for url in urls for group in range(GROUPS)]
+
+    def allocate(nbytes: int) -> tuple[np.ndarray, np.ndarray]:
+        buffer = np.empty(nbytes, dtype=np.uint8)
+        return buffer, buffer
+
+    stream = RawBlockStream(reader, allocate, in_flight=3, threads=2)
+    seen = {}
+    try:
+        for key, (url, group) in enumerate(groups):
+            stream.submit(key, {"url": url, "slice": row_group_slice(group)})  # type: ignore[typeddict-item]
+        while stream.pending:
+            key, raw = stream.next()
+            assert raw.window == (ROWS, 1)
+            seen[key] = raw.slot[1][: raw.nbytes].view(raw.dtype).reshape(ROWS, DIM).copy()
+            stream.release(raw)
+    finally:
+        stream.close()
+
+    for key, (url, group) in enumerate(groups):
+        vectors, valid = reader.read_row_group(url, group)
+        np.testing.assert_array_equal(np.isfinite(seen[key]).all(axis=1), valid)
+        np.testing.assert_array_equal(seen[key][valid].astype(np.float32), vectors[valid])
+    assert not np.isfinite(seen[2 * GROUPS + PLANTED[0]][PLANTED[1]]).any()
+
+
+def test_the_torch_backend_streams_row_groups_to_the_same_neighbours_as_numpy(
+    manifest: str, boxes: tuple[list[str], np.ndarray]
+) -> None:
+    pytest.importorskip("torch")
+    from rayzin.enums import SearchBackendType
+
+    urls, target = boxes
+    queries = np.stack([target, np.random.default_rng(3).normal(size=DIM).astype(np.float32)])
+
+    streamed = knn_parquet_search(
+        manifest, queries, k=5, backend=SearchBackendType.TORCH, prefetch=3
+    )
+    read = knn_parquet_search(manifest, queries, k=5)
+
+    assert (streamed.chunks[0]["url"], streamed.offsets[0]) == (urls[2], PLANTED[1])
+    assert sorted(zip(streamed.query_ids, streamed.offsets)) == sorted(
+        zip(read.query_ids, read.offsets)
+    )
+    np.testing.assert_allclose(
+        sorted(streamed.distances), sorted(read.distances), rtol=1e-3, atol=1e-4
+    )

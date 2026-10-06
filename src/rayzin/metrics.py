@@ -93,7 +93,9 @@ def _add_lower_bounds(
         msg = f"Expected queries to have shape (nq, d), got {query_matrix.shape!r}."
         raise ValueError(msg)
 
-    centroids = np.asarray(batch.column(COL_CENTROID).to_pylist(), dtype=np.float32)
+    centroids = np.asarray(batch.column(COL_CENTROID).to_pylist(), dtype=np.float32).reshape(
+        batch.num_rows, query_matrix.shape[1]
+    )
     radii = np.asarray(batch.column(COL_RADIUS).to_pylist(), dtype=np.float32)
     lower_bounds = _lower_bounds(
         query_matrix,
