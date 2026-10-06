@@ -1,8 +1,6 @@
 import asyncio
-import queue
-import threading
 import zlib
-from collections.abc import Callable, Coroutine, Sequence
+from collections.abc import Coroutine, Sequence
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
 from typing import Any, TypeVar
@@ -123,14 +121,13 @@ class CogVectorReader:
     async def layout(self, url: str) -> CogLayout:
         return (await self._open(url))[1]
 
-    async def fetch_compressed(
-        self, url: str, y0: int, x0: int
-    ) -> tuple[CogLayout, int, int, memoryview]:
-        """The still-compressed block at pixel origin ``(y0, x0)``: layout, row, column, bytes."""
-        tiff, layout = await self._open(url)
+    async def fetch_encoded(self, chunk: ChunkRecord) -> "EncodedCogBlock":
+        """A chunk's block, fetched but still compressed."""
+        tiff, layout = await self._open(chunk["url"])
+        y0, x0 = _origin_of(chunk)
         row, column = y0 // layout.block_height, x0 // layout.block_width
         [tile] = await tiff.fetch_tiles([(column, row)], 0)
-        return layout, row, column, memoryview(tile.compressed_bytes)
+        return EncodedCogBlock(layout, row, column, memoryview(tile.compressed_bytes))
 
     async def fetch_blocks(self, origins: Sequence[tuple[str, int, int]]) -> list[Block]:
         """Fetch and decode the blocks at ``(url, y0, x0)`` pixel origins, one batch per file."""
@@ -264,91 +261,27 @@ def _origin_of(chunk: ChunkRecord) -> tuple[int, int]:
 
 
 @dataclass(frozen=True)
-class RawBlock:
-    """A block decoded in its stored dtype into a host buffer the consumer hands back."""
-
-    slot: tuple[Any, np.ndarray]
+class EncodedCogBlock:
     layout: CogLayout
     row: int
     column: int
+    data: memoryview
 
     @property
-    def nbytes(self) -> int:
-        return self.layout.block_nbytes
+    def dtype(self) -> np.dtype[Any]:
+        return self.layout.dtype
 
+    @property
+    def shape(self) -> tuple[int, int, int]:
+        return self.layout.block_height, self.layout.block_width, self.layout.bands
 
-class RawBlockStream:
-    """Fetches and decodes COG blocks into reusable host buffers, as many at once as allowed.
+    @property
+    def window(self) -> tuple[int, int]:
+        y0, y1, x0, x1 = self.layout.window(self.row, self.column)
+        return y1 - y0, x1 - x0
 
-    ``in_flight`` bounds blocks fetched but not yet decoded, ``threads`` decode at once, and a
-    decoded block holds its buffer until ``release``, so memory stays bounded. ``allocate``
-    makes a buffer of at least n bytes, e.g. pinned memory, and returns it with a writable
-    uint8 view. Blocks come back in the order they finish.
-    """
-
-    def __init__(
-        self,
-        reader: CogVectorReader,
-        allocate: Callable[[int], tuple[Any, np.ndarray]],
-        *,
-        in_flight: int,
-        threads: int,
-    ) -> None:
-        self._reader = reader
-        self._allocate = allocate
-        self._loop = asyncio.new_event_loop()
-        self._thread = threading.Thread(target=self._loop.run_forever, daemon=True)
-        self._thread.start()
-        self._gate = asyncio.Semaphore(in_flight)
-        self._pool = ThreadPoolExecutor(threads)
-        self._free: queue.Queue[tuple[Any, np.ndarray] | None] = queue.Queue()
-        for _ in range(threads + 2):
-            self._free.put(None)
-        self._ready: queue.Queue[tuple[Any, RawBlock | None, BaseException | None]] = queue.Queue()
-        self.pending = 0
-
-    def submit(self, key: Any, url: str, y0: int, x0: int) -> None:
-        self.pending += 1
-        asyncio.run_coroutine_threadsafe(self._fetch(key, url, y0, x0), self._loop)
-
-    def next(self) -> tuple[Any, RawBlock]:
-        key, block, error = self._ready.get()
-        self.pending -= 1
-        if error is not None:
-            raise error
-        assert block is not None
-        return key, block
-
-    def release(self, block: RawBlock) -> None:
-        self._free.put(block.slot)
-
-    def close(self) -> None:
-        self._loop.call_soon_threadsafe(self._loop.stop)
-        self._thread.join()
-        self._pool.shutdown()
-
-    async def _fetch(self, key: Any, url: str, y0: int, x0: int) -> None:
-        await self._gate.acquire()
-        try:
-            layout, row, column, data = await self._reader.fetch_compressed(url, y0, x0)
-        except Exception as error:
-            self._gate.release()
-            self._ready.put((key, None, error))
-            return
-        self._pool.submit(self._decode, key, layout, row, column, data)
-
-    def _decode(self, key: Any, layout: CogLayout, row: int, column: int, data: memoryview) -> None:
-        slot = self._free.get()
-        try:
-            if slot is None or slot[1].nbytes < layout.block_nbytes:
-                slot = self._allocate(layout.block_nbytes)
-            decode_block_into(data, layout, slot[1][: layout.block_nbytes])
-            self._ready.put((key, RawBlock(slot, layout, row, column), None))
-        except Exception as error:
-            self._free.put(slot)
-            self._ready.put((key, None, error))
-        finally:
-            self._loop.call_soon_threadsafe(self._gate.release)
+    def decode_into(self, out: np.ndarray) -> None:
+        decode_block_into(self.data, self.layout, out)
 
 
 def decode_block_into(data: memoryview | bytes, layout: CogLayout, out: np.ndarray) -> None:

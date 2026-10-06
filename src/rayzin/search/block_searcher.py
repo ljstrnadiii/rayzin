@@ -156,12 +156,9 @@ class BlockSearcher:
         )
 
     def _streams(self) -> bool:
-        """Whether blocks stream to the device: COG blocks, and a backend that scores them raw."""
-        from rayzin.readers.cog_reader import CogVectorReader
-
-        return hasattr(self.backend, "search_raw_device") and isinstance(
-            self.reader, CogVectorReader
-        )
+        """Whether chunks stream to the device: a reader that fetches them encoded, and a backend
+        that scores them raw."""
+        return hasattr(self.backend, "search_raw_device") and hasattr(self.reader, "fetch_encoded")
 
     def _candidates(self, rows: list[LowerBoundRow]) -> Iterator[LowerBoundRow]:
         """Rows, in bound order, that the bounds known when each is reached cannot rule out."""
@@ -184,7 +181,7 @@ class BlockSearcher:
     def _streamed(self, rows: list[LowerBoundRow]) -> Iterator[tuple[LowerBoundRow, Any]]:
         """Keep ``prefetch`` candidates fetching and decoding while earlier ones are scored."""
         if self._stream is None:
-            from rayzin.readers.cog_reader import RawBlockStream
+            from rayzin.readers.stream import RawBlockStream
 
             self._stream = RawBlockStream(
                 self.reader,  # type: ignore[arg-type]
@@ -199,8 +196,7 @@ class BlockSearcher:
         while True:
             while stream.pending < self.prefetch and (row := next(candidates, None)) is not None:
                 waiting[submitted] = row
-                origin = {part[COL_DIM]: part[COL_START] for part in row[COL_SLICE]}
-                stream.submit(submitted, row[COL_URL], origin["y"], origin["x"])
+                stream.submit(submitted, _chunk_record(row))
                 submitted += 1
             if not stream.pending:
                 return
