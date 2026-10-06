@@ -29,8 +29,9 @@ fits naturally into Ray Data execution.
   Ray Data while final top-k merging stays centralized in a heap actor.
 - **Pluggable search backends:** NumPy, FAISS and torch backends share the same pipeline so
   pruning and result handling stay consistent across implementations.
-- **GPU streaming:** with the torch backend, COG blocks stream to the GPU in their stored dtype
-  (e.g. float16) from pinned buffers, and the top-k stays on the device.
+- **GPU streaming:** with the torch backend, COG blocks and Parquet row groups stream to the GPU
+  in their stored dtype (e.g. float16) from pinned buffers, one ranged request each, many in
+  flight, and the top-k stays on the device.
 
 ## Current Scope
 
