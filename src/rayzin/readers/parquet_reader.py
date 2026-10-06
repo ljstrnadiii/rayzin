@@ -42,43 +42,17 @@ class ObjectFile(io.RawIOBase):
         return int(self._reader.tell())
 
 
-class RangeFile(io.RawIOBase):
-    """A file of which only some byte ranges were fetched, as pyarrow reads Parquet from.
+def sparse_file(size: int, ranges: Sequence[tuple[int, Any]]) -> pa.BufferReader:
+    """A file of ``size`` bytes holding only the fetched ``ranges``, as pyarrow reads Parquet.
 
-    Reading outside the fetched ranges fails, so a read that needs more than its column chunks
-    shows up instead of silently fetching.
+    The buffer is allocated but only the ranges are written, so the rest never takes memory, and
+    pyarrow reads it natively: a Python file object would take the GIL for every small read.
     """
-
-    def __init__(self, size: int, ranges: Sequence[tuple[int, Any]]) -> None:
-        self._size = size
-        self._ranges = [(start, memoryview(data)) for start, data in ranges]
-        self._position = 0
-
-    def readable(self) -> bool:
-        return True
-
-    def seekable(self) -> bool:
-        return True
-
-    def readinto(self, buffer: Any) -> int:
-        if self._position >= self._size:
-            return 0
-        for start, data in self._ranges:
-            if start <= self._position < start + len(data):
-                part = data[self._position - start :][: len(buffer)]
-                memoryview(buffer)[: len(part)] = part
-                self._position += len(part)
-                return len(part)
-        msg = f"Byte {self._position} was not fetched."
-        raise OSError(msg)
-
-    def seek(self, offset: int, whence: int = io.SEEK_SET) -> int:
-        base = {io.SEEK_SET: 0, io.SEEK_CUR: self._position, io.SEEK_END: self._size}[whence]
-        self._position = base + offset
-        return self._position
-
-    def tell(self) -> int:
-        return self._position
+    buffer = np.empty(size, dtype=np.uint8)
+    for start, data in ranges:
+        view = np.frombuffer(memoryview(data), dtype=np.uint8)
+        buffer[start : start + len(view)] = view
+    return pa.BufferReader(pa.py_buffer(buffer))
 
 
 @dataclass(frozen=True)
@@ -114,7 +88,7 @@ class EncodedRowGroup:
 
     def decode_into(self, out: np.ndarray) -> None:
         """Vectors in their stored dtype, with invalid or filtered-out rows as NaN."""
-        file = pq.ParquetFile(RangeFile(self.info.size, self.ranges), metadata=self.info.footer)
+        file = pq.ParquetFile(sparse_file(self.info.size, self.ranges), metadata=self.info.footer)
         table = self.reader.read_columns(file, self.group)
         values = table.column(self.reader.column).combine_chunks()
         rows, _, width = self.shape
@@ -235,7 +209,7 @@ class ParquetVectorReader:
         starts, ends = _spans(info.footer, group, columns)
         parts = obstore.get_ranges(*self._store_and_path(url), starts=starts, ends=ends)
         ranges = list(zip(starts, parts, strict=True))
-        return pq.ParquetFile(RangeFile(info.size, ranges), metadata=info.footer)
+        return pq.ParquetFile(sparse_file(info.size, ranges), metadata=info.footer)
 
     async def _info(self, url: str) -> FileInfo:
         """``_file_info`` without blocking, fetched once however many row groups ask at once."""
