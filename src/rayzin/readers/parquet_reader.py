@@ -133,8 +133,9 @@ class ParquetVectorReader:
     0.1``, or with any non-finite value are no-data: they come back as a far-away vector, so
     offsets stay aligned and no-data never ranks. With ``normalize``, vectors are unit length.
 
-    ``fetch_encoded`` serves ``RawBlockStream``: one ranged request per needed column chunk, at
-    offsets from the file's footer, which is read once per file.
+    A row group is read with one ranged request per run of adjacent column chunks it needs, at
+    offsets from its file's footer, which is read once per file. ``fetch_encoded`` does the
+    same for ``RawBlockStream``.
     """
 
     def __init__(
@@ -153,7 +154,7 @@ class ParquetVectorReader:
         self._row_filter = row_filter
         self._filter_columns = list(row_filter_columns)
         self._stores: dict[str, Any] = {}
-        self._footers: dict[str, pq.FileMetaData] = {}
+        self._files: dict[str, FileInfo] = {}
         self._infos: dict[str, asyncio.Future[FileInfo]] = {}
         self._pool = ThreadPoolExecutor(threads)
 
@@ -172,11 +173,13 @@ class ParquetVectorReader:
         return list(self._pool.map(one, chunks))
 
     def row_groups(self, url: str) -> int:
-        return int(self._footer(url).num_row_groups)
+        return int(self._file_info(url).footer.num_row_groups)
 
     def read_row_group(self, url: str, group: int) -> tuple[Float32Array, np.ndarray]:
         """Unit vectors of one row group and which rows hold a valid, unfiltered vector."""
-        table = self.read_columns(self._file(url), group)
+        table = self._row_group_file(url, group, self._columns()).read_row_group(
+            group, columns=self._columns()
+        )
         values = table.column(self.column).combine_chunks()
         width = values.type.list_size
         vectors = np.asarray(
@@ -189,7 +192,7 @@ class ParquetVectorReader:
         return vectors, valid
 
     def read_columns(self, file: pq.ParquetFile, group: int) -> pa.Table:
-        return file.read_row_group(group, columns=[self.column, *self._filter_columns])
+        return file.read_row_group(group, columns=self._columns())
 
     def passes(self, table: pa.Table, values: pa.FixedSizeListArray) -> np.ndarray:
         """Which rows hold a vector and pass ``row_filter``."""
@@ -203,80 +206,61 @@ class ParquetVectorReader:
         return valid
 
     async def fetch_encoded(self, chunk: ChunkRecord) -> EncodedRowGroup:
-        """A chunk's row group, as one ranged request per run of adjacent columns it needs."""
+        """A chunk's row group, fetched but not decoded."""
         import obstore
 
         url, group = chunk["url"], _row_group(chunk)
         info = await self._info(url)
-        wanted = {self.column, *self._filter_columns}
-        meta = info.footer.row_group(group)
-        spans = []
-        for index in range(meta.num_columns):
-            column = meta.column(index)
-            if column.path_in_schema.split(".")[0] in wanted:
-                start = (
-                    column.dictionary_page_offset
-                    if column.has_dictionary_page
-                    else column.data_page_offset
-                )
-                spans.append((start, start + column.total_compressed_size))
-        starts: list[int] = []
-        ends: list[int] = []
-        for start, end in sorted(spans):
-            if ends and start <= ends[-1]:
-                ends[-1] = max(ends[-1], end)
-            else:
-                starts.append(start)
-                ends.append(end)
+        starts, ends = _spans(info.footer, group, self._columns())
         store, path = self._store_and_path(url)
         parts = await obstore.get_ranges_async(store, path, starts=starts, ends=ends)
         return EncodedRowGroup(self, info, group, list(zip(starts, parts, strict=True)))
 
+    def read_rows(
+        self, url: str, group: int, rows: Sequence[int], columns: Sequence[str]
+    ) -> pa.Table:
+        """Other columns of some rows of a row group, e.g. a hit's geometry and score."""
+        file = self._row_group_file(url, group, columns)
+        table = file.read_row_group(group, columns=list(columns))
+        return table.take(pa.array(list(rows), type=pa.int64()))
+
+    def _columns(self) -> list[str]:
+        return [self.column, *self._filter_columns]
+
+    def _row_group_file(self, url: str, group: int, columns: Sequence[str]) -> pq.ParquetFile:
+        """A file holding just the column chunks of ``group`` that ``columns`` need."""
+        import obstore
+
+        info = self._file_info(url)
+        starts, ends = _spans(info.footer, group, columns)
+        parts = obstore.get_ranges(*self._store_and_path(url), starts=starts, ends=ends)
+        ranges = list(zip(starts, parts, strict=True))
+        return pq.ParquetFile(RangeFile(info.size, ranges), metadata=info.footer)
+
     async def _info(self, url: str) -> FileInfo:
-        """A file's size and footer, fetched once however many row groups ask at once."""
+        """``_file_info`` without blocking, fetched once however many row groups ask at once."""
         if url not in self._infos:
-            self._infos[url] = asyncio.ensure_future(asyncio.to_thread(self._read_info, url))
+            self._infos[url] = asyncio.ensure_future(asyncio.to_thread(self._file_info, url))
         try:
             return await self._infos[url]
         except Exception:
             self._infos.pop(url, None)
             raise
 
-    def _read_info(self, url: str) -> FileInfo:
-        import obstore
+    def _file_info(self, url: str) -> FileInfo:
+        if url not in self._files:
+            import obstore
 
-        store, path = self._store_and_path(url)
-        handle = obstore.open_reader(store, path)
-        footer = self._footers.get(url) or pq.ParquetFile(ObjectFile(handle)).metadata
-        self._footers.setdefault(url, footer)
-        field = footer.schema.to_arrow_schema().field(self.column).type
-        return FileInfo(
-            int(handle.size), footer, np.dtype(field.value_type.to_pandas_dtype()), field.list_size
-        )
-
-    def read_rows(
-        self, url: str, group: int, rows: Sequence[int], columns: Sequence[str]
-    ) -> pa.Table:
-        """Other columns of some rows of a row group, e.g. a hit's geometry and score."""
-        table = self._file(url).read_row_group(group, columns=list(columns))
-        return table.take(pa.array(list(rows), type=pa.int64()))
-
-    def _file(self, url: str) -> pq.ParquetFile:
-        """A handle of its own for each read; one file object read from several threads at once
-        crashes pyarrow. The footer is read once per file and reused."""
-        import obstore
-
-        handle = ObjectFile(obstore.open_reader(*self._store_and_path(url)))
-        footer = self._footers.get(url)
-        file = pq.ParquetFile(handle, metadata=footer)
-        if footer is None:
-            self._footers[url] = file.metadata
-        return file
-
-    def _footer(self, url: str) -> pq.FileMetaData:
-        if url not in self._footers:
-            self._file(url)
-        return self._footers[url]
+            handle = obstore.open_reader(*self._store_and_path(url))
+            footer = pq.ParquetFile(ObjectFile(handle)).metadata
+            field = footer.schema.to_arrow_schema().field(self.column).type
+            self._files[url] = FileInfo(
+                int(handle.size),
+                footer,
+                np.dtype(field.value_type.to_pandas_dtype()),
+                field.list_size,
+            )
+        return self._files[url]
 
     def _store_and_path(self, url: str) -> tuple[Any, str]:
         from obstore.store import LocalStore, from_url
@@ -288,6 +272,33 @@ class ParquetVectorReader:
         if root not in self._stores:
             self._stores[root] = from_url(root, **self._store_kwargs)
         return self._stores[root], parsed.path.lstrip("/")
+
+
+def _spans(
+    footer: pq.FileMetaData, group: int, columns: Sequence[str]
+) -> tuple[list[int], list[int]]:
+    """Byte ranges of a row group's chunks of ``columns``, adjacent chunks merged, since
+    pyarrow reads adjacent chunks in one go."""
+    meta = footer.row_group(group)
+    spans = []
+    for index in range(meta.num_columns):
+        chunk = meta.column(index)
+        if chunk.path_in_schema.split(".")[0] in columns:
+            start = (
+                chunk.dictionary_page_offset
+                if chunk.has_dictionary_page
+                else chunk.data_page_offset
+            )
+            spans.append((start, start + chunk.total_compressed_size))
+    starts: list[int] = []
+    ends: list[int] = []
+    for start, end in sorted(spans):
+        if ends and start <= ends[-1]:
+            ends[-1] = max(ends[-1], end)
+        else:
+            starts.append(start)
+            ends.append(end)
+    return starts, ends
 
 
 def row_group_slice(group: int) -> list[dict[str, Any]]:
