@@ -47,6 +47,8 @@ def sparse_file(size: int, ranges: Sequence[tuple[int, Any]]) -> pa.BufferReader
 
     The buffer is allocated but only the ranges are written, so the rest never takes memory, and
     pyarrow reads it natively: a Python file object would take the GIL for every small read.
+    Callers decode with ``use_threads=False``: they decode on threads of their own, and Ray
+    sizes Arrow's pool by ``OMP_NUM_THREADS``, one thread in an actor with one CPU.
     """
     buffer = np.empty(size, dtype=np.uint8)
     for start, data in ranges:
@@ -151,9 +153,7 @@ class ParquetVectorReader:
 
     def read_row_group(self, url: str, group: int) -> tuple[Float32Array, np.ndarray]:
         """Unit vectors of one row group and which rows hold a valid, unfiltered vector."""
-        table = self._row_group_file(url, group, self._columns()).read_row_group(
-            group, columns=self._columns()
-        )
+        table = self.read_columns(self._row_group_file(url, group, self._columns()), group)
         values = table.column(self.column).combine_chunks()
         width = values.type.list_size
         vectors = np.asarray(
@@ -166,7 +166,7 @@ class ParquetVectorReader:
         return vectors, valid
 
     def read_columns(self, file: pq.ParquetFile, group: int) -> pa.Table:
-        return file.read_row_group(group, columns=self._columns())
+        return file.read_row_group(group, columns=self._columns(), use_threads=False)
 
     def passes(self, table: pa.Table, values: pa.FixedSizeListArray) -> np.ndarray:
         """Which rows hold a vector and pass ``row_filter``."""
@@ -195,7 +195,7 @@ class ParquetVectorReader:
     ) -> pa.Table:
         """Other columns of some rows of a row group, e.g. a hit's geometry and score."""
         file = self._row_group_file(url, group, columns)
-        table = file.read_row_group(group, columns=list(columns))
+        table = file.read_row_group(group, columns=list(columns), use_threads=False)
         return table.take(pa.array(list(rows), type=pa.int64()))
 
     def _columns(self) -> list[str]:
