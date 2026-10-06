@@ -1,6 +1,62 @@
 # CHANGELOG
 
 
+## v0.2.0 (2026-10-06)
+
+### Bug Fixes
+
+- Bound a manifest batch that a filter emptied
+  ([`c9e635f`](https://github.com/ljstrnadiii/rayzin/commit/c9e635f08ee90f69287a5556f43f0d088580303f))
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+
+### Documentation
+
+- Parquet row groups stream to the GPU too
+  ([`2d2b973`](https://github.com/ljstrnadiii/rayzin/commit/2d2b973bc6908e5700e005dd424c4e7e98b2e5b5))
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+
+### Features
+
+- Stream Parquet row groups to the GPU like COG blocks
+  ([`6c66d1f`](https://github.com/ljstrnadiii/rayzin/commit/6c66d1f72b67cd1d25e2e28642e3c32adca51cf9))
+
+One ranged request per run of adjacent column chunks, at offsets from a footer read once per file;
+  decoded in the stored dtype into pinned buffers, with invalid or filtered rows as NaN, and scored
+  by the torch backend's raw path. The block stream moves to readers/stream.py and takes any reader
+  with fetch_encoded.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+
+### Performance Improvements
+
+- Decode fetched row groups from a native sparse buffer
+  ([`0d6c8fb`](https://github.com/ljstrnadiii/rayzin/commit/0d6c8fb3f78a519c1abfa0d300ae3229d770b971))
+
+A Python file object made pyarrow take the GIL for every small read, so decode threads queued on it
+  with the CPU idle.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+
+- Decode row groups on the reader's threads, not Arrow's pool
+  ([`07e1642`](https://github.com/ljstrnadiii/rayzin/commit/07e164263511b0147ccb25ee3571bd968d1734d2))
+
+Ray sets OMP_NUM_THREADS=1 in a one-CPU actor, which sizes Arrow's CPU pool to one thread, so eight
+  decode threads queued on it: 194 MB/s vs 1,391 MB/s locally.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+
+- Read single row groups with ranged requests too
+  ([`be0f245`](https://github.com/ljstrnadiii/rayzin/commit/be0f2458159bbcf95e90a85cb943835a364f7885))
+
+read_row_group and read_rows fetched through a buffered file object, many small sequential reads per
+  row group. They now fetch the needed column chunks in one request per adjacent run, like the
+  stream.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+
+
 ## v0.1.0 (2026-10-06)
 
 ### Bug Fixes
