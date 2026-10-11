@@ -25,7 +25,10 @@ def test_indexed_parquet_never_opens_source_footer(
         }
     )
     pq.write_table(table, url, row_group_size=4, compression="zstd")
-    assert build_byte_index([url], root, kind="parquet", metadata={"year": [2026]}) == 1
+    assert build_byte_index(
+        [url], root, kind="parquet", metadata={"year": [2026]},
+        partition_by=("year", "bucket"),
+    ) == 1
 
     index = ByteIndex(root)
     assert len(index.rows(url)) == 3
