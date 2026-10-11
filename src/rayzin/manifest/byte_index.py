@@ -177,6 +177,10 @@ class ByteIndex:
         self.dataset = catalog.dataset()
         self._rows: dict[str, list[dict[str, Any]]] = {}
         self._decoder: dict[str, bytes] = {}
+        self._groups: dict[str, dict[int, dict[str, Any]]] = {}
+        self._tiles: dict[str, dict[tuple[int, int], dict[str, Any]]] = {}
+        self._parquet_info: dict[str, Any] = {}
+        self._layouts: dict[str, CogLayout] = {}
 
     def rows(self, url: str) -> list[dict[str, Any]]:
         if url not in self._rows:
@@ -198,25 +202,31 @@ class ByteIndex:
     ) -> tuple[Any, list[tuple[int, int]]]:
         from rayzin.readers.parquet_reader import FileInfo
 
-        row = next(ref for ref in self.rows(url) if ref["row_group"] == group)
-        footer = pq.read_metadata(pa.BufferReader(self.decoder(url)))
-        field = footer.schema.to_arrow_schema().field(columns[0]).type
-        info = FileInfo(
-            row["file_size"], footer,
-            np.dtype(field.value_type.to_pandas_dtype()), field.list_size,
-        )
-        return info, _merge_spans(row["spans"], columns)
+        if url not in self._groups:
+            self._groups[url] = {ref["row_group"]: ref for ref in self.rows(url)}
+        row = self._groups[url][group]
+        if url not in self._parquet_info:
+            footer = pq.read_metadata(pa.BufferReader(self.decoder(url)))
+            field = footer.schema.to_arrow_schema().field(columns[0]).type
+            self._parquet_info[url] = FileInfo(
+                row["file_size"], footer,
+                np.dtype(field.value_type.to_pandas_dtype()), field.list_size,
+            )
+        return self._parquet_info[url], _merge_spans(row["spans"], columns)
 
     def cog_layout(self, url: str) -> CogLayout:
-        raw = json.loads(self.decoder(url))
-        raw["dtype"] = np.dtype(raw["dtype"])
-        raw["transform"] = tuple(raw["transform"])
-        return CogLayout(**raw)
+        if url not in self._layouts:
+            raw = json.loads(self.decoder(url))
+            raw["dtype"] = np.dtype(raw["dtype"])
+            raw["transform"] = tuple(raw["transform"])
+            self._layouts[url] = CogLayout(**raw)
+        return self._layouts[url]
 
     def cog(self, url: str, row: int, col: int) -> tuple[CogLayout, int, int]:
-        ref = next(
-            item for item in self.rows(url)
-            if item["tile_row"] == row and item["tile_col"] == col
-        )
+        if url not in self._tiles:
+            self._tiles[url] = {
+                (item["tile_row"], item["tile_col"]): item for item in self.rows(url)
+            }
+        ref = self._tiles[url][row, col]
         span = ref["spans"][0]
         return self.cog_layout(url), int(span["offset"]), int(span["length"])
