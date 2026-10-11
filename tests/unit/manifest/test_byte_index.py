@@ -1,3 +1,4 @@
+import asyncio
 from pathlib import Path
 
 import numpy as np
@@ -43,7 +44,7 @@ def test_indexed_parquet_never_opens_source_footer(
         np.testing.assert_array_equal(found, values[group * 4: (group + 1) * 4])
         assert valid.all()
     chunk = {"url": url, "slice": row_group_slice(1)}
-    encoded = reader.run(reader.fetch_encoded(chunk))  # type: ignore[arg-type]
+    encoded = asyncio.run(reader.fetch_encoded(chunk))  # type: ignore[arg-type]
     assert encoded.shape == (4, 1, 4)
 
 
