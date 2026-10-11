@@ -71,7 +71,10 @@ def test_cog_tile_direct_read(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -
     async def forbidden(*args: object, **kwargs: object) -> None:
         raise AssertionError("Source TIFF header was opened")
 
-    monkeypatch.setattr(async_tiff.TIFF, "open", forbidden)
+    class ForbidTIFF:
+        open = staticmethod(forbidden)
+
+    monkeypatch.setattr(async_tiff, "TIFF", ForbidTIFF)
     indexed = CogVectorReader(normalize=False, byte_index_path=root)
     chunk = {
         "url": url, "slice": [
