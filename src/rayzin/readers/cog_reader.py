@@ -87,7 +87,11 @@ class CogVectorReader:
         normalize: bool = True,
         store_kwargs: dict[str, Any] | None = None,
         decode_threads: int = 8,
+        byte_index_path: str | None = None,
     ) -> None:
+        from rayzin.manifest.byte_index import ByteIndex
+
+        self._index = ByteIndex(byte_index_path) if byte_index_path else None
         self._normalize = normalize
         self.decode_threads = decode_threads
         self._store_kwargs = store_kwargs or {}
@@ -119,13 +123,25 @@ class CogVectorReader:
         return self._loop.run_until_complete(coroutine)
 
     async def layout(self, url: str) -> CogLayout:
+        if self._index is not None:
+            return self._index.cog_layout(url)
         return (await self._open(url))[1]
 
     async def fetch_encoded(self, chunk: ChunkRecord) -> "EncodedCogBlock":
         """A chunk's block, fetched but still compressed."""
-        tiff, layout = await self._open(chunk["url"])
+        url = chunk["url"]
+        layout = await self.layout(url)
         y0, x0 = _origin_of(chunk)
         row, column = y0 // layout.block_height, x0 // layout.block_width
+        if self._index is not None:
+            import obstore
+
+            _, start, length = self._index.cog(url, row, column)
+            data = await obstore.get_range_async(
+                *self._store_and_path(url), start=start, length=length
+            )
+            return EncodedCogBlock(layout, row, column, memoryview(data))
+        tiff, _ = await self._open(url)
         [tile] = await tiff.fetch_tiles([(column, row)], 0)
         return EncodedCogBlock(layout, row, column, memoryview(tile.compressed_bytes))
 
@@ -152,10 +168,24 @@ class CogVectorReader:
         self, url: str, cells: Sequence[tuple[int, int]] | None = None
     ) -> list[Block]:
         """Fetch and decode ``(row, column)`` blocks of one file, every block by default."""
-        tiff, layout = await self._open(url)
+        layout = await self.layout(url)
         if cells is None:
             cells = [(r, c) for r in range(layout.blocks_down) for c in range(layout.blocks_across)]
-        tiles = await tiff.fetch_tiles([(column, row) for row, column in cells], 0)
+        if self._index is not None:
+            import obstore
+
+            spans = [self._index.cog(url, row, column)[1:] for row, column in cells]
+            tiles = await obstore.get_ranges_async(
+                *self._store_and_path(url),
+                starts=[start for start, _ in spans],
+                lengths=[length for _, length in spans],
+                coalesce=0,
+            )
+            buffers = [memoryview(data) for data in tiles]
+        else:
+            tiff, _ = await self._open(url)
+            tiles = await tiff.fetch_tiles([(column, row) for row, column in cells], 0)
+            buffers = [memoryview(tile.compressed_bytes) for tile in tiles]
         loop = asyncio.get_running_loop()
         return list(
             await asyncio.gather(
@@ -167,9 +197,9 @@ class CogVectorReader:
                         row,
                         column,
                         layout,
-                        memoryview(tile.compressed_bytes),
+                        data,
                     )
-                    for (row, column), tile in zip(cells, tiles, strict=True)
+                    for (row, column), data in zip(cells, buffers, strict=True)
                 )
             )
         )
