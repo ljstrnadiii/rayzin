@@ -196,6 +196,8 @@ class Catalog:
             raise ValueError("Expected paths relative to the catalog root")
         for _ in range(retries):
             previous, token = self.snapshot()
+            if not removed.issubset(previous["files"]):
+                raise CommitConflict("Input fragments were replaced by another compaction")
             files = list(dict.fromkeys(
                 [file for file in previous["files"] if file not in removed] + add
             ))
