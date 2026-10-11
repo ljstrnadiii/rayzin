@@ -191,12 +191,12 @@ class ByteIndex:
     """Loads only one URL bucket at a time, and caches decoder metadata per source."""
 
     def __init__(
-        self, root: str, *, partition_by: tuple[str, ...] = ("bucket",), filesystem: Any = None
+        self, root: str, *, partition_by: tuple[str, ...] | None = None, filesystem: Any = None
     ) -> None:
-        if "bucket" not in partition_by:
-            raise ValueError("The physical index must be partitioned by bucket")
         self.catalog = Catalog(root, partition_by=partition_by, filesystem=filesystem)
         self.snapshot = self.catalog.snapshot()[0]
+        if "bucket" not in self.snapshot["partition_by"]:
+            raise ValueError("The physical index must be partitioned by bucket")
         self.fs = self.catalog.fs
         self.base = self.catalog.base
         self._buckets: dict[int, Any] = {}
