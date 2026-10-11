@@ -112,6 +112,8 @@ def build_byte_index(
     """Index only metadata; source payload bytes are never downloaded or decoded."""
     if kind not in ("parquet", "cog"):
         raise ValueError(f"Unsupported source kind: {kind}")
+    if "bucket" not in partition_by:
+        raise ValueError("The physical index must be partitioned by bucket")
     if files_per_batch < 1:
         raise ValueError("files_per_batch must be positive")
     if any(len(values) != len(urls) for values in (metadata or {}).values()):
@@ -171,10 +173,13 @@ class ByteIndex:
         self, root: str, *, partition_by: tuple[str, ...] = ("bucket",),
         filesystem: Any = None
     ) -> None:
-        catalog = Catalog(root, partition_by=partition_by, filesystem=filesystem)
-        self.fs = catalog.fs
-        self.base = catalog.base
-        self.dataset = catalog.dataset()
+        if "bucket" not in partition_by:
+            raise ValueError("The physical index must be partitioned by bucket")
+        self.catalog = Catalog(root, partition_by=partition_by, filesystem=filesystem)
+        self.snapshot = self.catalog.snapshot()[0]
+        self.fs = self.catalog.fs
+        self.base = self.catalog.base
+        self._buckets: dict[int, Any] = {}
         self._rows: dict[str, list[dict[str, Any]]] = {}
         self._decoder: dict[str, bytes] = {}
         self._groups: dict[str, dict[int, dict[str, Any]]] = {}
@@ -184,8 +189,15 @@ class ByteIndex:
 
     def rows(self, url: str) -> list[dict[str, Any]]:
         if url not in self._rows:
-            predicate = (pc.field("bucket") == _bucket(url)) & (pc.field("url") == url)
-            self._rows[url] = self.dataset.to_table(filter=predicate).to_pylist()
+            bucket = _bucket(url)
+            if bucket not in self._buckets:
+                self._buckets[bucket] = self.catalog.dataset(
+                    partitions={"bucket": bucket}, snapshot=self.snapshot
+                )
+            predicate = pc.field("url") == url
+            self._rows[url] = self._buckets[bucket].to_table(
+                filter=predicate
+            ).to_pylist()
             if not self._rows[url]:
                 raise KeyError(f"Source not indexed: {url}")
         return self._rows[url]
