@@ -138,12 +138,12 @@ class Catalog:
         self,
         root: str,
         *,
-        partition_by: tuple[str, ...] = (),
+        partition_by: tuple[str, ...] | None = (),
         store: ObjectStore | None = None,
         filesystem: Any = None,
     ) -> None:
         self.root = root.rstrip("/")
-        self.partition_by = tuple(partition_by)
+        self.partition_by = None if partition_by is None else tuple(partition_by)
         self.fs: Any
         self.base: str
         self.fs, self.base = (
@@ -169,13 +169,13 @@ class Catalog:
     def snapshot(self) -> tuple[dict[str, Any], str | int | None]:
         head, version = self.store.read(self._key("HEAD.json"))
         if head is None:
-            return {"files": [], "partition_by": list(self.partition_by)}, None
+            return {"files": [], "partition_by": list(self.partition_by or ())}, None
         target = json.loads(head)["snapshot"]
         body, _ = self.store.read(self._key(target))
         if body is None:
             raise FileNotFoundError(target)
         result: dict[str, Any] = json.loads(body)
-        if tuple(result["partition_by"]) != self.partition_by:
+        if self.partition_by is not None and tuple(result["partition_by"]) != self.partition_by:
             raise ValueError("Catalog partition_by differs from the committed snapshot")
         return result, version
 
@@ -236,7 +236,7 @@ class Catalog:
             )
             target = f"snapshots/{uuid4().hex}.json"
             body = json.dumps(
-                {"version": 1, "files": files, "partition_by": list(self.partition_by)}
+                {"version": 1, "files": files, "partition_by": previous["partition_by"]}
             ).encode()
             self.store.write(self._key(target), body, None)
             try:
@@ -252,13 +252,14 @@ class Catalog:
         if table.num_rows == 0:
             return []
         target = f"segments/{uuid4().hex}"
+        partition_by = self.partition_by or tuple(self.snapshot()[0]["partition_by"])
         ds.write_dataset(
             table,
             self._path(target),
             filesystem=self.fs,
             format="parquet",
-            partitioning=list(self.partition_by) or None,
-            partitioning_flavor="hive" if self.partition_by else None,
+            partitioning=list(partition_by) or None,
+            partitioning_flavor="hive" if partition_by else None,
             basename_template="part-{i}.parquet",
             max_rows_per_file=rows_per_file,
             max_rows_per_group=rows_per_file,
@@ -273,13 +274,14 @@ class Catalog:
         if len(original["files"]) < 2:
             return []
         target = f"segments/{uuid4().hex}"
+        partition_by = self.partition_by or tuple(original["partition_by"])
         ds.write_dataset(
             self.dataset(),
             self._path(target),
             filesystem=self.fs,
             format="parquet",
-            partitioning=list(self.partition_by) or None,
-            partitioning_flavor="hive" if self.partition_by else None,
+            partitioning=list(partition_by) or None,
+            partitioning_flavor="hive" if partition_by else None,
             basename_template="part-{i}.parquet",
             max_rows_per_file=rows_per_file,
             max_rows_per_group=rows_per_file,
