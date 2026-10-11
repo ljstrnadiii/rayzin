@@ -263,3 +263,19 @@ class Catalog:
             for item in info
             if item.type == pafs.FileType.File and item.path.endswith(".parquet")
         )
+
+
+def main() -> None:
+    import argparse
+
+    parser = argparse.ArgumentParser(description="Compact immutable Rayzin manifest fragments")
+    parser.add_argument("root", help="Manifest root, local, s3:// or gs://")
+    parser.add_argument("--partition-by", nargs="*", default=["bucket"])
+    parser.add_argument("--rows-per-file", type=int, default=131072)
+    args = parser.parse_args()
+    catalog = Catalog(args.root, partition_by=tuple(args.partition_by))
+    catalog.compact(rows_per_file=args.rows_per_file)
+
+
+if __name__ == "__main__":
+    main()
