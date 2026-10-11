@@ -25,13 +25,15 @@ class ObjectStore(Protocol):
 
 class S3Store:
     def __init__(self, bucket: str, client: Any = None) -> None:
-        import boto3
+        if client is None:
+            import boto3  # type: ignore[import-not-found]
 
+            client = boto3.client("s3")
         self.bucket = bucket
-        self.client = client or boto3.client("s3")
+        self.client = client
 
     def read(self, key: str) -> tuple[bytes | None, str | None]:
-        from botocore.exceptions import ClientError
+        from botocore.exceptions import ClientError  # type: ignore[import-not-found]
 
         try:
             response = self.client.get_object(Bucket=self.bucket, Key=key)
@@ -57,12 +59,12 @@ class S3Store:
 
 class GCSStore:
     def __init__(self, bucket: str, client: Any = None) -> None:
-        from google.cloud import storage
+        from google.cloud import storage  # type: ignore[import-untyped]
 
         self.bucket = (client or storage.Client()).bucket(bucket)
 
     def read(self, key: str) -> tuple[bytes | None, int | None]:
-        from google.api_core.exceptions import NotFound, PreconditionFailed
+        from google.api_core.exceptions import NotFound, PreconditionFailed  # type: ignore[import-untyped]
 
         for _ in range(3):
             blob = self.bucket.blob(key)
@@ -77,7 +79,7 @@ class GCSStore:
         raise CommitConflict(f"Concurrent reads of {key} did not stabilize")
 
     def write(self, key: str, value: bytes, expected: str | int | None) -> None:
-        from google.api_core.exceptions import Conflict, PreconditionFailed
+        from google.api_core.exceptions import Conflict, PreconditionFailed  # type: ignore[import-untyped]
 
         try:
             self.bucket.blob(key).upload_from_string(
@@ -135,6 +137,8 @@ class Catalog:
     ) -> None:
         self.root = root.rstrip("/")
         self.partition_by = tuple(partition_by)
+        self.fs: Any
+        self.base: str
         self.fs, self.base = (
             pafs.FileSystem.from_uri(self.root) if filesystem is None
             else (filesystem, self.root)
