@@ -66,7 +66,7 @@ async def _cog_refs(
 def _parquet_refs(
     url: str, filesystem: Any
 ) -> tuple[list[dict[str, Any]], bytes, int]:
-    import pyarrow.fs as pafs
+    import pyarrow.fs as pafs  # type: ignore[import-untyped]
 
     if filesystem is None:
         fs, path = pafs.FileSystem.from_uri(url)
