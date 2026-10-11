@@ -27,9 +27,9 @@ def test_indexed_parquet_never_opens_source_footer(
 
     index = ByteIndex(root)
     assert len(index.rows(url)) == 3
-    assert index.dataset.to_table(
-        filter=(pc.field("bucket") == index.rows(url)[0]["bucket"]) &
-        (pc.field("year") == 2026)
+    assert index.catalog.scan(
+        filter=pc.field("year") == 2026,
+        partitions={"bucket": index.rows(url)[0]["bucket"]},
     ).num_rows == 3
 
     import obstore
