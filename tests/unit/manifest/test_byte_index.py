@@ -11,7 +11,9 @@ from rayzin.readers.cog_reader import CogVectorReader
 from rayzin.readers.parquet_reader import ParquetVectorReader, row_group_slice
 
 
-def test_indexed_parquet_never_opens_source_footer(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+def test_indexed_parquet_never_opens_source_footer(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
     url = str(tmp_path / "source.parquet")
     root = str(tmp_path / "index")
     values = np.arange(48, dtype=np.float32).reshape(12, 4)
