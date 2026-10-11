@@ -20,9 +20,7 @@ def test_local_snapshots_partition_filter_and_compaction(tmp_path: Path) -> None
     old_paths = set(catalog.files())
     compacted = catalog.compact(rows_per_file=100)
     assert compacted and not old_paths.intersection(catalog.files())
-    assert sorted(catalog.scan(columns=["url"]).column("url").to_pylist()) == [
-        "a", "b", "c", "d"
-    ]
+    assert sorted(catalog.scan(columns=["url"]).column("url").to_pylist()) == ["a", "b", "c", "d"]
     assert all((tmp_path / "catalog" / p).exists() for p in first + second)
 
 
@@ -38,7 +36,9 @@ def test_compare_and_swap_prevents_lost_updates(tmp_path: Path) -> None:
         store.write("HEAD.json", b"{}", token)
     b.commit(["segments/c.parquet"])
     assert a.snapshot()[0]["files"] == [
-        "segments/a.parquet", "segments/b.parquet", "segments/c.parquet"
+        "segments/a.parquet",
+        "segments/b.parquet",
+        "segments/c.parquet",
     ]
     with pytest.raises(CommitConflict, match="compaction"):
         b.commit(["segments/replaced.parquet"], remove=["segments/gone.parquet"])
