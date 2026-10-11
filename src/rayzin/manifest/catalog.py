@@ -67,7 +67,10 @@ class GCSStore:
         self.bucket = (client or storage.Client()).bucket(bucket)
 
     def read(self, key: str) -> tuple[bytes | None, int | None]:
-        from google.api_core.exceptions import NotFound, PreconditionFailed  # type: ignore[import-untyped]
+        from google.api_core.exceptions import (  # type: ignore[import-untyped]
+            NotFound,
+            PreconditionFailed,
+        )
 
         for _ in range(3):
             blob = self.bucket.blob(key)
