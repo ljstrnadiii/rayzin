@@ -46,6 +46,67 @@ fits naturally into Ray Data execution.
 - Batched query input shaped `(1, d)` or `(nq, d)`, and the Euclidean pruning path, which
   `prune=False` turns off when chunk bounds cannot rule anything out.
 
+## Virtual byte index and snapshot catalog
+
+For immutable COGs and Parquet, Rayzin can index byte positions **without reading or
+decoding source payloads**. This is opt-in; existing manifests and readers are unchanged.
+
+```python
+from rayzin.manifest.byte_index import build_byte_index
+from rayzin.pipeline import knn_parquet_search
+
+root = "gs://my-bucket/rayzin/physical"
+build_byte_index(
+    ["gs://my-bucket/embeddings/part-0.parquet"],
+    root,
+    kind="parquet",
+    metadata={"year": [2026]},
+    partition_by=("year", "bucket"),
+)
+
+# Existing summarized search manifest; range reads use the independent physical index.
+hits = knn_parquet_search("gs://my-bucket/rayzin/search", queries, k=10,
+                          byte_index_path=root)
+```
+
+For COGs, use `kind="cog"` and `knn_cog_search(..., byte_index_path=root)`.
+Parquet indexing saves a compact metadata-only footer per file plus one indexed row
+per row group (with all its column-chunk spans). COG indexing saves its TIFF layout
+once plus individual tile byte ranges. The new readers read source bytes directly
+from those ranges; non-indexed calls use the original readers. The sidecar decoder
+metadata is cached by each reader. Original file layout must remain immutable.
+
+The physical index is stored as partitioned Parquet segments, with per-column Parquet
+statistics and optional Hive partition pruning. Every indexed column can be projected
+or filtered via PyArrow expressions, although arbitrary predicates are **not**
+guaranteed to avoid all fragment/row-group metadata reads. Default partitioning uses
+a stable URL hash bucket; choose commonly filtered metadata columns too (for example,
+`partition_by=("year", "bucket")`). A new `ByteIndex` only materializes rows for
+a requested URL bucket, not the entire physical index.
+
+Catalog commits write immutable Parquet fragments, then an immutable snapshot listing
+their paths, then compare-and-swap `HEAD.json`. AWS S3 uses `IfMatch`/`IfNoneMatch`;
+GCS uses generation preconditions. Only the cloud-specific snapshot pointer needs
+the extra SDK (`pip install boto3` for S3, or `pip install google-cloud-storage`
+for GCS). The data and index reads still use PyArrow and obstore. Local catalogs use
+a file lock for development and tests. Concurrent writers retry additive commits,
+and a stale compaction fails safely.
+
+To compact periodically, run an ephemeral job (Cloud Run Jobs, Batch, cron):
+
+```bash
+python -m rayzin.manifest.catalog gs://my-bucket/rayzin/physical \
+  --partition-by year bucket --rows-per-file 131072
+```
+
+Compaction never deletes old snapshots, decoder sidecars, or fragments automatically:
+readers may still be pinned to them. Garbage-collect only after a separately enforced
+reader-retention window. The catalog currently assumes **immutable source objects**;
+it does not pin cloud object versions or validate remote ETags at every range request.
+Keep the fast path opt-in until real cold-cache and sustained-throughput benchmarks
+confirm a win. `build_byte_index` is append-only; only supply newly ingested source
+files, or duplicated rows may be indexed.
+
 ## Installation
 
 Install the base package from PyPI:
