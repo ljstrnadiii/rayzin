@@ -27,6 +27,9 @@ jobs:
           locked: true
           cache: true
 
+      - name: Inspect lint
+        run: pixi run -e dev ruff check --diff src/rayzin/manifest/catalog.py src/rayzin/manifest/byte_index.py tests/unit/manifest/test_catalog.py tests/unit/manifest/test_byte_index.py || true
+
       - name: Inspect formatting
         run: pixi run -e dev ruff format --diff src/rayzin/manifest/catalog.py src/rayzin/manifest/byte_index.py tests/unit/manifest/test_catalog.py tests/unit/manifest/test_byte_index.py || true
 
