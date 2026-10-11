@@ -122,6 +122,7 @@ def build_byte_index(
     }):
         raise ValueError("Metadata overrides a physical index field")
     catalog = Catalog(root, partition_by=partition_by, filesystem=filesystem)
+    catalog.fs.create_dir(catalog._path("decoders"), recursive=True)
     stores: dict[str, Any] = {}
     for start in range(0, len(urls), files_per_batch):
         batch = []
@@ -204,14 +205,16 @@ class ByteIndex:
         )
         return info, _merge_spans(row["spans"], columns)
 
+    def cog_layout(self, url: str) -> CogLayout:
+        raw = json.loads(self.decoder(url))
+        raw["dtype"] = np.dtype(raw["dtype"])
+        raw["transform"] = tuple(raw["transform"])
+        return CogLayout(**raw)
+
     def cog(self, url: str, row: int, col: int) -> tuple[CogLayout, int, int]:
         ref = next(
             item for item in self.rows(url)
             if item["tile_row"] == row and item["tile_col"] == col
         )
-        raw = json.loads(self.decoder(url))
-        raw["dtype"] = np.dtype(raw["dtype"])
-        raw["transform"] = tuple(raw["transform"])
-        layout = CogLayout(**raw)
         span = ref["spans"][0]
-        return layout, int(span["offset"]), int(span["length"])
+        return self.cog_layout(url), int(span["offset"]), int(span["length"])
