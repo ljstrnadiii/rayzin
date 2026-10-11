@@ -82,7 +82,7 @@ class GCSStore:
         raise CommitConflict(f"Concurrent reads of {key} did not stabilize")
 
     def write(self, key: str, value: bytes, expected: str | int | None) -> None:
-        from google.api_core.exceptions import Conflict, PreconditionFailed  # type: ignore[import-untyped]
+        from google.api_core.exceptions import Conflict, PreconditionFailed
 
         try:
             self.bucket.blob(key).upload_from_string(
