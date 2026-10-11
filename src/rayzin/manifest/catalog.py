@@ -1,6 +1,8 @@
 """Immutable Parquet manifests with a conditional S3/GCS snapshot pointer."""
 
+import hashlib
 import json
+import os
 import posixpath
 from typing import Any, Protocol
 from urllib.parse import urlparse
@@ -86,6 +88,40 @@ class GCSStore:
             raise CommitConflict(key) from exc
 
 
+class LocalStore:
+    def __init__(self, root: str) -> None:
+        self.root = root
+        os.makedirs(root, exist_ok=True)
+
+    def read(self, key: str) -> tuple[bytes | None, str | None]:
+        try:
+            with open(os.path.join(self.root, key), "rb") as source:
+                data = source.read()
+        except FileNotFoundError:
+            return None, None
+        return data, hashlib.sha256(data).hexdigest()
+
+    def write(self, key: str, value: bytes, expected: str | int | None) -> None:
+        import fcntl
+
+        path = os.path.join(self.root, key)
+        os.makedirs(os.path.dirname(path), exist_ok=True)
+        lock_path = os.path.join(self.root, ".catalog.lock")
+        with open(lock_path, "a+b") as lock:
+            fcntl.flock(lock, fcntl.LOCK_EX)
+            _, current = self.read(key)
+            if current != expected:
+                raise CommitConflict(key)
+            temporary = f"{path}.{uuid4().hex}.tmp"
+            try:
+                with open(temporary, "xb") as target:
+                    target.write(value)
+                os.replace(temporary, path)
+            finally:
+                if os.path.exists(temporary):
+                    os.unlink(temporary)
+
+
 class Catalog:
     """No service: immutable fragments and snapshots, one conditional HEAD update."""
 
@@ -104,14 +140,14 @@ class Catalog:
             else (filesystem, self.root)
         )
         parsed = urlparse(self.root)
-        self.prefix = parsed.path.strip("/")
+        self.prefix = parsed.path.strip("/") if parsed.scheme in ("s3", "gs", "gcs") else ""
         if store is None:
             if parsed.scheme == "s3":
                 store = S3Store(parsed.netloc)
             elif parsed.scheme in ("gs", "gcs"):
                 store = GCSStore(parsed.netloc)
             else:
-                raise ValueError("Snapshot publication requires s3:// or gs:// (or a store)")
+                store = LocalStore(self.base)
         self.store = store
 
     def _key(self, relative: str) -> str:
