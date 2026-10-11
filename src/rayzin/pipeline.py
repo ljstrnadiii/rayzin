@@ -88,6 +88,7 @@ def knn_cog_search(
     decode_threads: int = 4,
     filesystem: Any = None,
     prune: bool = True,
+    byte_index_path: str | None = None,
 ) -> SearchResults:
     """Exact top-``k`` over the COG blocks of a manifest built by ``build_manifest_from_cogs``.
 
@@ -116,6 +117,7 @@ def knn_cog_search(
             "normalize": normalize,
             "store_kwargs": store_kwargs or {},
             "decode_threads": decode_threads,
+            "byte_index_path": byte_index_path,
         },
         metric=metric,
         backend=backend,
@@ -153,6 +155,7 @@ def knn_parquet_search(
     prefetch: int = 8,
     filesystem: Any = None,
     prune: bool = True,
+    byte_index_path: str | None = None,
 ) -> SearchResults:
     """Exact top-``k`` over the row groups of a manifest built by ``build_manifest_from_parquet``.
 
@@ -173,6 +176,7 @@ def knn_parquet_search(
             "store_kwargs": store_kwargs or {},
             "row_filter": row_filter,
             "row_filter_columns": row_filter_columns,
+            "byte_index_path": byte_index_path,
         },
         metric=metric,
         backend=backend,
