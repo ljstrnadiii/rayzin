@@ -51,7 +51,10 @@ class S3Store:
             self.client.put_object(Bucket=self.bucket, Key=key, Body=value, **condition)
         except ClientError as exc:
             if exc.response["Error"]["Code"] in (
-                "PreconditionFailed", "ConditionalRequestConflict", "412", "409"
+                "PreconditionFailed",
+                "ConditionalRequestConflict",
+                "412",
+                "409",
             ):
                 raise CommitConflict(key) from exc
             raise
@@ -83,8 +86,9 @@ class GCSStore:
 
         try:
             self.bucket.blob(key).upload_from_string(
-                value, content_type="application/json",
-                if_generation_match=0 if expected is None else int(expected)
+                value,
+                content_type="application/json",
+                if_generation_match=0 if expected is None else int(expected),
             )
         except (PreconditionFailed, Conflict) as exc:
             raise CommitConflict(key) from exc
@@ -140,8 +144,7 @@ class Catalog:
         self.fs: Any
         self.base: str
         self.fs, self.base = (
-            pafs.FileSystem.from_uri(self.root) if filesystem is None
-            else (filesystem, self.root)
+            pafs.FileSystem.from_uri(self.root) if filesystem is None else (filesystem, self.root)
         )
         parsed = urlparse(self.root)
         self.prefix = parsed.path.strip("/") if parsed.scheme in ("s3", "gs", "gcs") else ""
@@ -185,7 +188,8 @@ class Catalog:
             if not set(partitions).issubset(current["partition_by"]):
                 raise ValueError("Cannot prune on an unpartitioned field")
             names = [
-                name for name in names
+                name
+                for name in names
                 if all(f"{key}={value}" in name.split("/") for key, value in partitions.items())
             ]
         return [self._path(name) for name in names]
@@ -214,13 +218,9 @@ class Catalog:
         *,
         partitions: dict[str, int | str] | None = None,
     ) -> pa.Table:
-        return self.dataset(partitions=partitions).to_table(
-            filter=filter, columns=columns
-        )
+        return self.dataset(partitions=partitions).to_table(filter=filter, columns=columns)
 
-    def commit(
-        self, add: list[str], *, remove: list[str] | None = None, retries: int = 8
-    ) -> None:
+    def commit(self, add: list[str], *, remove: list[str] | None = None, retries: int = 8) -> None:
         removed = set(remove or [])
         if any(path.startswith("/") or ".." in path.split("/") for path in [*add, *removed]):
             raise ValueError("Expected paths relative to the catalog root")
@@ -228,9 +228,9 @@ class Catalog:
             previous, token = self.snapshot()
             if not removed.issubset(previous["files"]):
                 raise CommitConflict("Input fragments were replaced by another compaction")
-            files = list(dict.fromkeys(
-                [file for file in previous["files"] if file not in removed] + add
-            ))
+            files = list(
+                dict.fromkeys([file for file in previous["files"] if file not in removed] + add)
+            )
             target = f"snapshots/{uuid4().hex}.json"
             body = json.dumps(
                 {"version": 1, "files": files, "partition_by": list(self.partition_by)}
