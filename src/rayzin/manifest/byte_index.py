@@ -193,7 +193,9 @@ class ByteIndex:
                 self._decoder[url] = source.read()
         return self._decoder[url]
 
-    def parquet(self, url: str, group: int, columns: list[str]) -> tuple[Any, list[tuple[int, int]]]:
+    def parquet(
+        self, url: str, group: int, columns: list[str]
+    ) -> tuple[Any, list[tuple[int, int]]]:
         from rayzin.readers.parquet_reader import FileInfo
 
         row = next(ref for ref in self.rows(url) if ref["row_group"] == group)
