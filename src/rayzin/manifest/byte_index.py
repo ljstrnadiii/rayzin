@@ -54,18 +54,22 @@ async def _cog_refs(
         row, col = divmod(idx, layout.blocks_across)
         if not length:
             continue
-        refs.append({
-            "url": url, "bucket": _bucket(url), "kind": "cog",
-            "slice": block_slice(layout, row, col),
-            "row_group": -1, "tile_row": row, "tile_col": col,
-            "spans": [{"column": "", "offset": int(offset), "length": int(length)}],
-        })
+        refs.append(
+            {
+                "url": url,
+                "bucket": _bucket(url),
+                "kind": "cog",
+                "slice": block_slice(layout, row, col),
+                "row_group": -1,
+                "tile_row": row,
+                "tile_col": col,
+                "spans": [{"column": "", "offset": int(offset), "length": int(length)}],
+            }
+        )
     return refs, json.dumps(payload).encode()
 
 
-def _parquet_refs(
-    url: str, filesystem: Any
-) -> tuple[list[dict[str, Any]], bytes, int]:
+def _parquet_refs(url: str, filesystem: Any) -> tuple[list[dict[str, Any]], bytes, int]:
     import pyarrow.fs as pafs  # type: ignore[import-untyped]
 
     if filesystem is None:
@@ -82,19 +86,26 @@ def _parquet_refs(
         spans = []
         for n in range(rg.num_columns):
             col = rg.column(n)
-            start = (
-                col.dictionary_page_offset if col.has_dictionary_page
-                else col.data_page_offset
+            start = col.dictionary_page_offset if col.has_dictionary_page else col.data_page_offset
+            spans.append(
+                {
+                    "column": col.path_in_schema,
+                    "offset": int(start),
+                    "length": int(col.total_compressed_size),
+                }
             )
-            spans.append({
-                "column": col.path_in_schema,
-                "offset": int(start), "length": int(col.total_compressed_size),
-            })
-        refs.append({
-            "url": url, "bucket": _bucket(url), "kind": "parquet",
-            "slice": row_group_slice(group), "row_group": group,
-            "tile_row": -1, "tile_col": -1, "spans": spans,
-        })
+        refs.append(
+            {
+                "url": url,
+                "bucket": _bucket(url),
+                "kind": "parquet",
+                "slice": row_group_slice(group),
+                "row_group": group,
+                "tile_row": -1,
+                "tile_col": -1,
+                "spans": spans,
+            }
+        )
     return refs, sink.getvalue().to_pybytes(), int(size)
 
 
@@ -118,10 +129,18 @@ def build_byte_index(
         raise ValueError("files_per_batch must be positive")
     if any(len(values) != len(urls) for values in (metadata or {}).values()):
         raise ValueError("Metadata values must match URLs")
-    if (set(metadata or {}) & {
-        "url", "bucket", "kind", "slice", "row_group", "tile_row", "tile_col",
-        "spans", "decoder", "file_size"
-    }):
+    if set(metadata or {}) & {
+        "url",
+        "bucket",
+        "kind",
+        "slice",
+        "row_group",
+        "tile_row",
+        "tile_col",
+        "spans",
+        "decoder",
+        "file_size",
+    }:
         raise ValueError("Metadata overrides a physical index field")
     catalog = Catalog(root, partition_by=partition_by, filesystem=filesystem)
     catalog.fs.create_dir(catalog._path("decoders"), recursive=True)
@@ -140,11 +159,13 @@ def build_byte_index(
             with catalog.fs.open_output_stream(catalog._path(decoder_path)) as out:
                 out.write(decoder)
             for ref in refs:
-                ref.update({
-                    "decoder": decoder_path,
-                    "file_size": size,
-                    **{name: values[i] for name, values in (metadata or {}).items()},
-                })
+                ref.update(
+                    {
+                        "decoder": decoder_path,
+                        "file_size": size,
+                        **{name: values[i] for name, values in (metadata or {}).items()},
+                    }
+                )
             batch.extend(refs)
         if batch:
             catalog.append(pa.Table.from_pylist(batch))
@@ -170,8 +191,7 @@ class ByteIndex:
     """Loads only one URL bucket at a time, and caches decoder metadata per source."""
 
     def __init__(
-        self, root: str, *, partition_by: tuple[str, ...] = ("bucket",),
-        filesystem: Any = None
+        self, root: str, *, partition_by: tuple[str, ...] = ("bucket",), filesystem: Any = None
     ) -> None:
         if "bucket" not in partition_by:
             raise ValueError("The physical index must be partitioned by bucket")
@@ -195,9 +215,7 @@ class ByteIndex:
                     partitions={"bucket": bucket}, snapshot=self.snapshot
                 )
             predicate = pc.field("url") == url
-            self._rows[url] = self._buckets[bucket].to_table(
-                filter=predicate
-            ).to_pylist()
+            self._rows[url] = self._buckets[bucket].to_table(filter=predicate).to_pylist()
             if not self._rows[url]:
                 raise KeyError(f"Source not indexed: {url}")
         return self._rows[url]
@@ -221,8 +239,10 @@ class ByteIndex:
             footer = pq.read_metadata(pa.BufferReader(self.decoder(url)))
             field = footer.schema.to_arrow_schema().field(columns[0]).type
             self._parquet_info[url] = FileInfo(
-                row["file_size"], footer,
-                np.dtype(field.value_type.to_pandas_dtype()), field.list_size,
+                row["file_size"],
+                footer,
+                np.dtype(field.value_type.to_pandas_dtype()),
+                field.list_size,
             )
         return self._parquet_info[url], _merge_spans(row["spans"], columns)
 
