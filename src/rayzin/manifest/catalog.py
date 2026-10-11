@@ -173,14 +173,32 @@ class Catalog:
             raise ValueError("Catalog partition_by differs from the committed snapshot")
         return result, version
 
-    def files(self) -> list[str]:
-        snapshot, _ = self.snapshot()
-        return [self._path(name) for name in snapshot["files"]]
+    def files(
+        self,
+        *,
+        partitions: dict[str, int | str] | None = None,
+        snapshot: dict[str, Any] | None = None,
+    ) -> list[str]:
+        current = snapshot if snapshot is not None else self.snapshot()[0]
+        names = current["files"]
+        if partitions:
+            if not set(partitions).issubset(current["partition_by"]):
+                raise ValueError("Cannot prune on an unpartitioned field")
+            names = [
+                name for name in names
+                if all(f"{key}={value}" in name.split("/") for key, value in partitions.items())
+            ]
+        return [self._path(name) for name in names]
 
-    def dataset(self) -> ds.Dataset:
-        files = self.files()
+    def dataset(
+        self,
+        *,
+        partitions: dict[str, int | str] | None = None,
+        snapshot: dict[str, Any] | None = None,
+    ) -> ds.Dataset:
+        files = self.files(partitions=partitions, snapshot=snapshot)
         if not files:
-            raise ValueError("Catalog has no fragments")
+            raise ValueError("No fragments match the selected partitions")
         return ds.dataset(
             files,
             filesystem=self.fs,
@@ -189,8 +207,16 @@ class Catalog:
             partition_base_dir=self.base,
         )
 
-    def scan(self, filter: Any = None, columns: list[str] | None = None) -> pa.Table:
-        return self.dataset().to_table(filter=filter, columns=columns)
+    def scan(
+        self,
+        filter: Any = None,
+        columns: list[str] | None = None,
+        *,
+        partitions: dict[str, int | str] | None = None,
+    ) -> pa.Table:
+        return self.dataset(partitions=partitions).to_table(
+            filter=filter, columns=columns
+        )
 
     def commit(
         self, add: list[str], *, remove: list[str] | None = None, retries: int = 8
