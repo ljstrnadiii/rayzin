@@ -122,7 +122,11 @@ class ParquetVectorReader:
         row_filter: pc.Expression | None = None,
         row_filter_columns: Sequence[str] = (),
         threads: int = 8,
+        byte_index_path: str | None = None,
     ) -> None:
+        from rayzin.manifest.byte_index import ByteIndex
+
+        self._index = ByteIndex(byte_index_path) if byte_index_path else None
         self.column = column
         self.decode_threads = threads
         self._normalize = normalize
@@ -185,7 +189,11 @@ class ParquetVectorReader:
 
         url, group = chunk["url"], _row_group(chunk)
         info = await self._info(url)
-        starts, ends = _spans(info.footer, group, self._columns())
+        if self._index is None:
+            starts, ends = _spans(info.footer, group, self._columns())
+        else:
+            spans = self._index.parquet(url, group, self._columns())[1]
+            starts, ends = [a for a, _ in spans], [b for _, b in spans]
         store, path = self._store_and_path(url)
         parts = await obstore.get_ranges_async(store, path, starts=starts, ends=ends)
         return EncodedRowGroup(self, info, group, list(zip(starts, parts, strict=True)))
@@ -206,7 +214,11 @@ class ParquetVectorReader:
         import obstore
 
         info = self._file_info(url)
-        starts, ends = _spans(info.footer, group, columns)
+        if self._index is None:
+            starts, ends = _spans(info.footer, group, columns)
+        else:
+            spans = self._index.parquet(url, group, list(columns))[1]
+            starts, ends = [a for a, _ in spans], [b for _, b in spans]
         parts = obstore.get_ranges(*self._store_and_path(url), starts=starts, ends=ends)
         ranges = list(zip(starts, parts, strict=True))
         return pq.ParquetFile(sparse_file(info.size, ranges), metadata=info.footer)
@@ -223,6 +235,9 @@ class ParquetVectorReader:
 
     def _file_info(self, url: str) -> FileInfo:
         if url not in self._files:
+            if self._index is not None:
+                self._files[url] = self._index.parquet(url, 0, [self.column])[0]
+                return self._files[url]
             import obstore
 
             handle = obstore.open_reader(*self._store_and_path(url))
