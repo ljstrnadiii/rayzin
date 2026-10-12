@@ -144,7 +144,7 @@ def build_byte_index(
         "file_size",
     }:
         raise ValueError("Metadata overrides a physical index field")
-    catalog = Catalog(root, partition_by=partition_by, filesystem=filesystem)
+    catalog = Catalog(root, filesystem=filesystem)
     catalog.fs.create_dir(catalog._path("decoders"), recursive=True)
     stores: dict[str, Any] = {}
     for start in range(0, len(urls), files_per_batch):
