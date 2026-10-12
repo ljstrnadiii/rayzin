@@ -123,10 +123,13 @@ class ParquetVectorReader:
         row_filter_columns: Sequence[str] = (),
         threads: int = 8,
         byte_index_path: str | None = None,
+        catalog_snapshot: dict[str, Any] | None = None,
     ) -> None:
         from rayzin.manifest.byte_index import ByteIndex
 
-        self._index = ByteIndex(byte_index_path) if byte_index_path else None
+        self._index = (
+            ByteIndex(byte_index_path, snapshot=catalog_snapshot) if byte_index_path else None
+        )
         self.column = column
         self.decode_threads = threads
         self._normalize = normalize
