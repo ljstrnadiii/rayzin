@@ -9,6 +9,8 @@ from ray.data.expressions import Expr, col
 from shapely.geometry.base import BaseGeometry  # type: ignore[import-untyped]
 
 from rayzin.enums import MetricType, ReaderType, SearchBackendType
+from rayzin.manifest.byte_index import build_byte_index
+from rayzin.manifest.catalog import catalog_at
 from rayzin.manifest.build import build_zarr_chunk_table, compute_chunk_summary_arrow
 from rayzin.manifest.cog import summarize_cog_blocks
 from rayzin.manifest.filtering import filter_manifest
@@ -89,6 +91,7 @@ def knn_cog_search(
     filesystem: Any = None,
     prune: bool = True,
     byte_index_path: str | None = None,
+    index_partitions: dict[str, int | str] | None = None,
 ) -> SearchResults:
     """Exact top-``k`` over the COG blocks of a manifest built by ``build_manifest_from_cogs``.
 
@@ -131,6 +134,7 @@ def knn_cog_search(
         prefetch=prefetch,
         filesystem=filesystem,
         prune=prune,
+        index_partitions=index_partitions,
     )
 
 
@@ -156,6 +160,7 @@ def knn_parquet_search(
     filesystem: Any = None,
     prune: bool = True,
     byte_index_path: str | None = None,
+    index_partitions: dict[str, int | str] | None = None,
 ) -> SearchResults:
     """Exact top-``k`` over the row groups of a manifest built by ``build_manifest_from_parquet``.
 
@@ -190,6 +195,7 @@ def knn_parquet_search(
         prefetch=prefetch,
         filesystem=filesystem,
         prune=prune,
+        index_partitions=index_partitions,
     )
 
 
@@ -212,6 +218,7 @@ def _knn_search(
     prefetch: int = 1,
     filesystem: Any = None,
     prune: bool = True,
+    index_partitions: dict[str, int | str] | None = None,
 ) -> SearchResults:
     if metric != MetricType.EUCLIDEAN:
         msg = "Search pruning currently supports only the euclidean metric."
@@ -224,9 +231,23 @@ def _knn_search(
         backend_type=backend.value,
     )
 
-    columns = None if prune else _columns_without_centroids(manifest_path, filesystem)
+    catalog = catalog_at(manifest_path, filesystem=filesystem)
+    path: str | list[str] = manifest_path
+    if catalog is not None:
+        snapshot, _ = catalog.snapshot()
+        path = catalog.files("chunks", partitions=index_partitions, snapshot=snapshot)
+        if not path:
+            raise ValueError("No chunk-index fragments match the selected partitions")
+        filesystem = catalog.fs
+        if reader_type in (ReaderType.COG, ReaderType.PARQUET):
+            reader_kwargs = {
+                **reader_kwargs,
+                "byte_index_path": manifest_path,
+                "catalog_snapshot": snapshot,
+            }
+    columns = None if prune else _columns_without_centroids(path, filesystem)
     bounded = filter_manifest(
-        ray.data.read_parquet(manifest_path, filesystem=filesystem, columns=columns).filter(
+        ray.data.read_parquet(path, filesystem=filesystem, columns=columns).filter(
             expr=col(COL_COUNT) > 0
         ),
         filter_expr=filter_expr,
@@ -283,11 +304,60 @@ def _knn_search(
     )
 
 
-def _columns_without_centroids(manifest_path: str, filesystem: Any) -> list[str]:
+def _columns_without_centroids(manifest_path: str | list[str], filesystem: Any) -> list[str]:
     import pyarrow.dataset as ds  # type: ignore[import-untyped]
 
     schema = ds.dataset(manifest_path, filesystem=filesystem, format="parquet").schema
     return [name for name in schema.names if name not in (COL_CENTROID, COL_RADIUS)]
+
+
+
+def index_cogs(
+    urls: list[str],
+    catalog_path: str,
+    *,
+    metadata: dict[str, list[Any]] | None = None,
+    partition_by: tuple[str, ...] = ("bucket",),
+    normalize: bool = True,
+    files_in_flight: int = 4,
+    files_per_batch: int = 8,
+    store_kwargs: dict[str, Any] | None = None,
+    filesystem: Any = None,
+) -> int:
+    """Index existing COGs; publish chunk, byte, and file indexes in one snapshot."""
+    return build_byte_index(
+        urls, catalog_path, kind="cog", metadata=metadata, partition_by=partition_by,
+        filesystem=filesystem, store_kwargs=store_kwargs, files_per_batch=files_per_batch,
+        summarize=lambda batch: summarize_cog_blocks(
+            batch, normalize=normalize, store_kwargs=store_kwargs or {},
+            files_in_flight=files_in_flight,
+        ),
+    )
+
+
+def index_parquet(
+    urls: list[str],
+    catalog_path: str,
+    *,
+    column: str = "embedding",
+    geometry: str | None = "geometry",
+    metadata: dict[str, list[Any]] | None = None,
+    partition_by: tuple[str, ...] = ("bucket",),
+    normalize: bool = True,
+    files_in_flight: int = 4,
+    files_per_batch: int = 8,
+    store_kwargs: dict[str, Any] | None = None,
+    filesystem: Any = None,
+) -> int:
+    """Index existing Parquet files; publish all three indexes in one snapshot."""
+    return build_byte_index(
+        urls, catalog_path, kind="parquet", metadata=metadata, partition_by=partition_by,
+        filesystem=filesystem, store_kwargs=store_kwargs, files_per_batch=files_per_batch,
+        summarize=lambda batch: summarize_parquet_row_groups(
+            batch, column=column, geometry=geometry, normalize=normalize,
+            store_kwargs=store_kwargs or {}, files_in_flight=files_in_flight,
+        ),
+    )
 
 
 def build_manifest(
