@@ -151,11 +151,7 @@ class Catalog:
             self.fs, self.base = pafs.FileSystem.from_uri(self.root)
         else:
             self.fs = filesystem
-            self.base = (
-                pafs.FileSystem.from_uri(self.root)[1]
-                if "://" in self.root
-                else self.root
-            )
+            self.base = pafs.FileSystem.from_uri(self.root)[1] if "://" in self.root else self.root
         parsed = urlparse(self.root)
         self.prefix = parsed.path.strip("/") if parsed.scheme in ("s3", "gs", "gcs") else ""
         if store is None:
@@ -272,10 +268,12 @@ class Catalog:
                     raise CommitConflict(
                         f"Input fragments were replaced by another compaction: {component}"
                     )
-                state["files"] = list(dict.fromkeys(
-                    [name for name in state["files"] if name not in dropped]
-                    + add.get(component, [])
-                ))
+                state["files"] = list(
+                    dict.fromkeys(
+                        [name for name in state["files"] if name not in dropped]
+                        + add.get(component, [])
+                    )
+                )
             target = f"snapshots/{uuid4().hex}.json"
             self.store.write(
                 self._key(target),
@@ -409,9 +407,7 @@ def main() -> None:
     parser.add_argument("--components", nargs="*", default=list(COMPONENTS))
     parser.add_argument("--rows-per-file", type=int, default=131072)
     args = parser.parse_args()
-    Catalog(args.root).compact(
-        components=tuple(args.components), rows_per_file=args.rows_per_file
-    )
+    Catalog(args.root).compact(components=tuple(args.components), rows_per_file=args.rows_per_file)
 
 
 if __name__ == "__main__":
