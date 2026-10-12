@@ -131,19 +131,20 @@ class LocalStore:
                     os.unlink(temporary)
 
 
+COMPONENTS = ("chunks", "bytes", "files")
+
+
 class Catalog:
-    """No service: immutable fragments and snapshots, one conditional HEAD update."""
+    """One atomic pointer for the chunk index, byte index, and file registry."""
 
     def __init__(
         self,
         root: str,
         *,
-        partition_by: tuple[str, ...] | None = (),
         store: ObjectStore | None = None,
         filesystem: Any = None,
     ) -> None:
         self.root = root.rstrip("/")
-        self.partition_by = None if partition_by is None else tuple(partition_by)
         self.fs: Any
         self.base: str
         self.fs, self.base = (
@@ -169,26 +170,30 @@ class Catalog:
     def snapshot(self) -> tuple[dict[str, Any], str | int | None]:
         head, version = self.store.read(self._key("HEAD.json"))
         if head is None:
-            return {"files": [], "partition_by": list(self.partition_by or ())}, None
+            return {"version": 2, "components": {}}, None
         target = json.loads(head)["snapshot"]
         body, _ = self.store.read(self._key(target))
         if body is None:
             raise FileNotFoundError(target)
         result: dict[str, Any] = json.loads(body)
-        if self.partition_by is not None and tuple(result["partition_by"]) != self.partition_by:
-            raise ValueError("Catalog partition_by differs from the committed snapshot")
+        if result.get("version") != 2:
+            raise ValueError("Unsupported catalog snapshot version")
         return result, version
 
     def files(
         self,
+        component: str = "chunks",
         *,
         partitions: dict[str, int | str] | None = None,
         snapshot: dict[str, Any] | None = None,
     ) -> list[str]:
+        if component not in COMPONENTS:
+            raise ValueError(f"Unknown catalog component: {component}")
         current = snapshot if snapshot is not None else self.snapshot()[0]
-        names = current["files"]
+        state = current["components"].get(component, {"files": [], "partition_by": []})
+        names = state["files"]
         if partitions:
-            if not set(partitions).issubset(current["partition_by"]):
+            if not set(partitions).issubset(state["partition_by"]):
                 raise ValueError("Cannot prune on an unpartitioned field")
             names = [
                 name
@@ -199,13 +204,14 @@ class Catalog:
 
     def dataset(
         self,
+        component: str = "chunks",
         *,
         partitions: dict[str, int | str] | None = None,
         snapshot: dict[str, Any] | None = None,
     ) -> ds.Dataset:
-        files = self.files(partitions=partitions, snapshot=snapshot)
+        files = self.files(component, partitions=partitions, snapshot=snapshot)
         if not files:
-            raise ValueError("No fragments match the selected partitions")
+            raise ValueError(f"No {component} fragments match the selected partitions")
         return ds.dataset(
             files,
             filesystem=self.fs,
@@ -216,29 +222,58 @@ class Catalog:
 
     def scan(
         self,
+        component: str = "chunks",
+        *,
         filter: Any = None,
         columns: list[str] | None = None,
-        *,
         partitions: dict[str, int | str] | None = None,
+        snapshot: dict[str, Any] | None = None,
     ) -> pa.Table:
-        return self.dataset(partitions=partitions).to_table(filter=filter, columns=columns)
+        return self.dataset(component, partitions=partitions, snapshot=snapshot).to_table(
+            filter=filter, columns=columns
+        )
 
-    def commit(self, add: list[str], *, remove: list[str] | None = None, retries: int = 8) -> None:
-        removed = set(remove or [])
-        if any(path.startswith("/") or ".." in path.split("/") for path in [*add, *removed]):
+    def commit(
+        self,
+        add: dict[str, list[str]],
+        *,
+        remove: dict[str, list[str]] | None = None,
+        partition_by: dict[str, tuple[str, ...]] | None = None,
+        retries: int = 8,
+    ) -> None:
+        """Prepare outside the CAS window; rebase additions on every retry."""
+        remove = remove or {}
+        partition_by = partition_by or {}
+        if not (set(add) | set(remove) | set(partition_by)).issubset(COMPONENTS):
+            raise ValueError("Unknown catalog component")
+        paths = [name for group in (*add.values(), *remove.values()) for name in group]
+        if any(name.startswith("/") or ".." in name.split("/") for name in paths):
             raise ValueError("Expected paths relative to the catalog root")
         for _ in range(retries):
             previous, token = self.snapshot()
-            if not removed.issubset(previous["files"]):
-                raise CommitConflict("Input fragments were replaced by another compaction")
-            files = list(
-                dict.fromkeys([file for file in previous["files"] if file not in removed] + add)
-            )
+            states = {
+                key: {"files": list(value["files"]), "partition_by": list(value["partition_by"])}
+                for key, value in previous["components"].items()
+            }
+            for component in set(add) | set(remove):
+                state = states.setdefault(component, {"files": [], "partition_by": []})
+                expected = list(partition_by.get(component, state["partition_by"]))
+                if state["files"] and state["partition_by"] != expected:
+                    raise ValueError(f"Partition layout changed for {component}")
+                state["partition_by"] = expected
+                dropped = set(remove.get(component, []))
+                if not dropped.issubset(state["files"]):
+                    raise CommitConflict(f"Input fragments were replaced by another compaction: {component}")
+                state["files"] = list(dict.fromkeys(
+                    [name for name in state["files"] if name not in dropped]
+                    + add.get(component, [])
+                ))
             target = f"snapshots/{uuid4().hex}.json"
-            body = json.dumps(
-                {"version": 1, "files": files, "partition_by": previous["partition_by"]}
-            ).encode()
-            self.store.write(self._key(target), body, None)
+            self.store.write(
+                self._key(target),
+                json.dumps({"version": 2, "components": states}).encode(),
+                None,
+            )
             try:
                 self.store.write(
                     self._key("HEAD.json"), json.dumps({"snapshot": target}).encode(), token
@@ -248,11 +283,19 @@ class Catalog:
                 continue
         raise CommitConflict("Too many concurrent catalog commits")
 
-    def append(self, table: pa.Table, *, rows_per_file: int = 131072) -> list[str]:
-        if table.num_rows == 0:
+    def stage(
+        self,
+        table: pa.Table | ds.Dataset,
+        component: str,
+        *,
+        partition_by: tuple[str, ...] = (),
+        rows_per_file: int = 131072,
+    ) -> list[str]:
+        if component not in COMPONENTS:
+            raise ValueError(f"Unknown catalog component: {component}")
+        if isinstance(table, pa.Table) and table.num_rows == 0:
             return []
-        target = f"segments/{uuid4().hex}"
-        partition_by = self.partition_by or tuple(self.snapshot()[0]["partition_by"])
+        target = f"segments/{component}/{uuid4().hex}"
         ds.write_dataset(
             table,
             self._path(target),
@@ -263,33 +306,71 @@ class Catalog:
             basename_template="part-{i}.parquet",
             max_rows_per_file=rows_per_file,
             max_rows_per_group=rows_per_file,
-            existing_data_behavior="error",
+            max_open_files=64,
         )
-        fragments = self._fragments(target)
-        self.commit(fragments)
-        return fragments
+        return self._fragments(target)
 
-    def compact(self, *, rows_per_file: int = 131072) -> list[str]:
-        original, _ = self.snapshot()
-        if len(original["files"]) < 2:
-            return []
-        target = f"segments/{uuid4().hex}"
-        partition_by = self.partition_by or tuple(original["partition_by"])
-        ds.write_dataset(
-            self.dataset(),
-            self._path(target),
-            filesystem=self.fs,
-            format="parquet",
-            partitioning=list(partition_by) or None,
-            partitioning_flavor="hive" if partition_by else None,
-            basename_template="part-{i}.parquet",
-            max_rows_per_file=rows_per_file,
-            max_rows_per_group=rows_per_file,
-            max_open_files=16,
-        )
-        fragments = self._fragments(target)
-        self.commit(fragments, remove=original["files"])
-        return fragments
+    def append_many(
+        self,
+        tables: dict[str, pa.Table],
+        *,
+        partition_by: dict[str, tuple[str, ...]] | None = None,
+        rows_per_file: int = 131072,
+    ) -> dict[str, list[str]]:
+        partition_by = partition_by or {}
+        previous, _ = self.snapshot()
+        paths: dict[str, list[str]] = {}
+        layouts: dict[str, tuple[str, ...]] = {}
+        for component, table in tables.items():
+            existing = previous["components"].get(component, {})
+            layout = partition_by.get(component, tuple(existing.get("partition_by", ())))
+            layouts[component] = layout
+            paths[component] = self.stage(
+                table, component, partition_by=layout, rows_per_file=rows_per_file
+            )
+        if any(paths.values()):
+            self.commit(paths, partition_by=layouts)
+        return paths
+
+    def append(
+        self,
+        table: pa.Table,
+        *,
+        component: str = "chunks",
+        partition_by: tuple[str, ...] | None = None,
+        rows_per_file: int = 131072,
+    ) -> list[str]:
+        layouts = {} if partition_by is None else {component: partition_by}
+        return self.append_many(
+            {component: table}, partition_by=layouts, rows_per_file=rows_per_file
+        )[component]
+
+    def compact(
+        self,
+        *,
+        components: tuple[str, ...] = COMPONENTS,
+        rows_per_file: int = 131072,
+    ) -> dict[str, list[str]]:
+        """Rewrite only metadata segments; commit all replacements atomically."""
+        previous, _ = self.snapshot()
+        replacements: dict[str, list[str]] = {}
+        removed: dict[str, list[str]] = {}
+        for component in components:
+            state = previous["components"].get(component, {})
+            originals: list[str] = state.get("files", [])
+            if len(originals) < 2:
+                continue
+            dataset = self.dataset(component, snapshot=previous)
+            replacements[component] = self.stage(
+                dataset,
+                component,
+                partition_by=tuple(state["partition_by"]),
+                rows_per_file=rows_per_file,
+            )
+            removed[component] = originals
+        if replacements:
+            self.commit(replacements, remove=removed)
+        return replacements
 
     def _fragments(self, target: str) -> list[str]:
         info = self.fs.get_file_info(pafs.FileSelector(self._path(target), recursive=True))
@@ -303,13 +384,14 @@ class Catalog:
 def main() -> None:
     import argparse
 
-    parser = argparse.ArgumentParser(description="Compact immutable Rayzin manifest fragments")
-    parser.add_argument("root", help="Manifest root, local, s3:// or gs://")
-    parser.add_argument("--partition-by", nargs="*", default=["bucket"])
+    parser = argparse.ArgumentParser(description="Compact immutable Rayzin index fragments")
+    parser.add_argument("root", help="Catalog root, local, s3:// or gs://")
+    parser.add_argument("--components", nargs="*", default=list(COMPONENTS))
     parser.add_argument("--rows-per-file", type=int, default=131072)
     args = parser.parse_args()
-    catalog = Catalog(args.root, partition_by=tuple(args.partition_by))
-    catalog.compact(rows_per_file=args.rows_per_file)
+    Catalog(args.root).compact(
+        components=tuple(args.components), rows_per_file=args.rows_per_file
+    )
 
 
 if __name__ == "__main__":
