@@ -311,7 +311,6 @@ def _columns_without_centroids(manifest_path: str | list[str], filesystem: Any) 
     return [name for name in schema.names if name not in (COL_CENTROID, COL_RADIUS)]
 
 
-
 def index_cogs(
     urls: list[str],
     catalog_path: str,
@@ -326,10 +325,18 @@ def index_cogs(
 ) -> int:
     """Index existing COGs; publish chunk, byte, and file indexes in one snapshot."""
     return build_byte_index(
-        urls, catalog_path, kind="cog", metadata=metadata, partition_by=partition_by,
-        filesystem=filesystem, store_kwargs=store_kwargs, files_per_batch=files_per_batch,
+        urls,
+        catalog_path,
+        kind="cog",
+        metadata=metadata,
+        partition_by=partition_by,
+        filesystem=filesystem,
+        store_kwargs=store_kwargs,
+        files_per_batch=files_per_batch,
         summarize=lambda batch: summarize_cog_blocks(
-            batch, normalize=normalize, store_kwargs=store_kwargs or {},
+            batch,
+            normalize=normalize,
+            store_kwargs=store_kwargs or {},
             files_in_flight=files_in_flight,
         ),
     )
@@ -351,11 +358,21 @@ def index_parquet(
 ) -> int:
     """Index existing Parquet files; publish all three indexes in one snapshot."""
     return build_byte_index(
-        urls, catalog_path, kind="parquet", metadata=metadata, partition_by=partition_by,
-        filesystem=filesystem, store_kwargs=store_kwargs, files_per_batch=files_per_batch,
+        urls,
+        catalog_path,
+        kind="parquet",
+        metadata=metadata,
+        partition_by=partition_by,
+        filesystem=filesystem,
+        store_kwargs=store_kwargs,
+        files_per_batch=files_per_batch,
         summarize=lambda batch: summarize_parquet_row_groups(
-            batch, column=column, geometry=geometry, normalize=normalize,
-            store_kwargs=store_kwargs or {}, files_in_flight=files_in_flight,
+            batch,
+            column=column,
+            geometry=geometry,
+            normalize=normalize,
+            store_kwargs=store_kwargs or {},
+            files_in_flight=files_in_flight,
         ),
     )
 
