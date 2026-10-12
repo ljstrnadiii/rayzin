@@ -4,6 +4,7 @@ import asyncio
 import hashlib
 import json
 from dataclasses import asdict
+from collections.abc import Callable
 from typing import Any
 from urllib.parse import urlparse
 from uuid import uuid4
@@ -119,6 +120,7 @@ def build_byte_index(
     filesystem: Any = None,
     store_kwargs: dict[str, Any] | None = None,
     files_per_batch: int = 32,
+    summarize: Callable[[pa.Table], pa.Table] | None = None,
 ) -> int:
     """Index only metadata; source payload bytes are never downloaded or decoded."""
     if kind not in ("parquet", "cog"):
@@ -147,6 +149,8 @@ def build_byte_index(
     stores: dict[str, Any] = {}
     for start in range(0, len(urls), files_per_batch):
         batch = []
+        file_rows = []
+        source_rows = []
         for i in range(start, min(start + files_per_batch, len(urls))):
             url = urls[i]
             if kind == "parquet":
@@ -158,17 +162,29 @@ def build_byte_index(
             decoder_path = f"decoders/{uuid4().hex}.bin"
             with catalog.fs.open_output_stream(catalog._path(decoder_path)) as out:
                 out.write(decoder)
+            properties = {name: values[i] for name, values in (metadata or {}).items()}
             for ref in refs:
-                ref.update(
-                    {
-                        "decoder": decoder_path,
-                        "file_size": size,
-                        **{name: values[i] for name, values in (metadata or {}).items()},
-                    }
-                )
+                ref.update(properties)
             batch.extend(refs)
-        if batch:
-            catalog.append(pa.Table.from_pylist(batch))
+            file_rows.append({
+                "url": url, "kind": kind, "bucket": _bucket(url),
+                "decoder": decoder_path, "file_size": size, **properties,
+            })
+            source_rows.append({"url": url, **properties})
+        if not batch:
+            continue
+        tables = {
+            "bytes": pa.Table.from_pylist(batch),
+            "files": pa.Table.from_pylist(file_rows),
+        }
+        if summarize is not None:
+            chunks = summarize(pa.Table.from_pylist(source_rows))
+            buckets = pa.array([_bucket(url) for url in chunks.column("url").to_pylist()])
+            tables["chunks"] = chunks.append_column("bucket", buckets)
+        catalog.append_many(
+            tables,
+            partition_by={component: partition_by for component in tables},
+        )
     return len(urls)
 
 
@@ -191,15 +207,18 @@ class ByteIndex:
     """Loads only one URL bucket at a time, and caches decoder metadata per source."""
 
     def __init__(
-        self, root: str, *, partition_by: tuple[str, ...] | None = None, filesystem: Any = None
+        self, root: str, *, filesystem: Any = None,
+        snapshot: dict[str, Any] | None = None,
     ) -> None:
-        self.catalog = Catalog(root, partition_by=partition_by, filesystem=filesystem)
-        self.snapshot = self.catalog.snapshot()[0]
-        if "bucket" not in self.snapshot["partition_by"]:
+        self.catalog = Catalog(root, filesystem=filesystem)
+        self.snapshot = snapshot if snapshot is not None else self.catalog.snapshot()[0]
+        if "bucket" not in self.snapshot["components"].get("bytes", {}).get("partition_by", []):
             raise ValueError("The physical index must be partitioned by bucket")
         self.fs = self.catalog.fs
         self.base = self.catalog.base
         self._buckets: dict[int, Any] = {}
+        self._registry: dict[int, Any] = {}
+        self._files: dict[str, dict[str, Any]] = {}
         self._rows: dict[str, list[dict[str, Any]]] = {}
         self._decoder: dict[str, bytes] = {}
         self._groups: dict[str, dict[int, dict[str, Any]]] = {}
@@ -212,7 +231,7 @@ class ByteIndex:
             bucket = _bucket(url)
             if bucket not in self._buckets:
                 self._buckets[bucket] = self.catalog.dataset(
-                    partitions={"bucket": bucket}, snapshot=self.snapshot
+                    "bytes", partitions={"bucket": bucket}, snapshot=self.snapshot
                 )
             predicate = pc.field("url") == url
             self._rows[url] = self._buckets[bucket].to_table(filter=predicate).to_pylist()
@@ -220,9 +239,24 @@ class ByteIndex:
                 raise KeyError(f"Source not indexed: {url}")
         return self._rows[url]
 
+    def file(self, url: str) -> dict[str, Any]:
+        if url not in self._files:
+            bucket = _bucket(url)
+            if bucket not in self._registry:
+                self._registry[bucket] = self.catalog.dataset(
+                    "files", partitions={"bucket": bucket}, snapshot=self.snapshot
+                )
+            rows = self._registry[bucket].to_table(
+                filter=pc.field("url") == url
+            ).to_pylist()
+            if len(rows) != 1:
+                raise KeyError(f"Expected one source file registry entry: {url}")
+            self._files[url] = rows[0]
+        return self._files[url]
+
     def decoder(self, url: str) -> bytes:
         if url not in self._decoder:
-            path = self.rows(url)[0]["decoder"]
+            path = self.file(url)["decoder"]
             with self.fs.open_input_file(f"{self.base}/{path}") as source:
                 self._decoder[url] = source.read()
         return self._decoder[url]
@@ -239,7 +273,7 @@ class ByteIndex:
             footer = pq.read_metadata(pa.BufferReader(self.decoder(url)))
             field = footer.schema.to_arrow_schema().field(columns[0]).type
             self._parquet_info[url] = FileInfo(
-                row["file_size"],
+                self.file(url)["file_size"],
                 footer,
                 np.dtype(field.value_type.to_pandas_dtype()),
                 field.list_size,
