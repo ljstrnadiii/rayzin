@@ -9,9 +9,7 @@ from rayzin.manifest.catalog import Catalog, CommitConflict, LocalStore
 
 def test_one_snapshot_covers_all_indexes_and_compaction(tmp_path: Path) -> None:
     catalog = Catalog(str(tmp_path))
-    layouts: dict[str, tuple[str, ...]] = {
-        part: ("year",) for part in ("chunks", "bytes", "files")
-    }
+    layouts: dict[str, tuple[str, ...]] = {part: ("year",) for part in ("chunks", "bytes", "files")}
 
     def batch(year: int) -> dict[str, pa.Table]:
         return {
@@ -26,9 +24,9 @@ def test_one_snapshot_covers_all_indexes_and_compaction(tmp_path: Path) -> None:
     assert set(old["components"]) == {"chunks", "bytes", "files"}
     assert all(len(value["files"]) == 2 for value in old["components"].values())
     assert len(catalog.files("bytes", partitions={"year": 2026})) == 1
-    assert catalog.scan(
-        "chunks", filter=pc.field("year") == 2026, columns=["url"]
-    ).column("url").to_pylist() == ["2026.parquet"]
+    assert catalog.scan("chunks", filter=pc.field("year") == 2026, columns=["url"]).column(
+        "url"
+    ).to_pylist() == ["2026.parquet"]
 
     original = {kind: catalog.files(kind) for kind in layouts}
     replacements = catalog.compact()
@@ -36,7 +34,8 @@ def test_one_snapshot_covers_all_indexes_and_compaction(tmp_path: Path) -> None:
     for kind in layouts:
         assert not set(original[kind]).intersection(catalog.files(kind))
         assert sorted(catalog.scan(kind, columns=["url"]).column("url").to_pylist()) == [
-            "2024.parquet", "2026.parquet"
+            "2024.parquet",
+            "2026.parquet",
         ]
         assert catalog.dataset(kind, snapshot=old).count_rows() == 2
         assert all(Path(path).exists() for path in original[kind])
