@@ -40,7 +40,8 @@ def test_indexed_parquet_never_opens_source_footer(
     assert len(index.rows(url)) == 3
     assert (
         index.catalog.scan(
-            "bytes", filter=pc.field("year") == 2026,
+            "bytes",
+            filter=pc.field("year") == 2026,
             partitions={"bucket": index.rows(url)[0]["bucket"]},
         ).num_rows
         == 3
@@ -124,14 +125,16 @@ def test_joint_parquet_ingest_searches_one_pinned_snapshot(
     url = str(tmp_path / "embeddings.parquet")
     root = str(tmp_path / "catalog")
     vectors = np.arange(48, dtype=np.float32).reshape(12, 4)
-    table = pa.table({
-        "embedding": pa.FixedSizeListArray.from_arrays(pa.array(vectors.ravel()), 4)
-    })
+    table = pa.table({"embedding": pa.FixedSizeListArray.from_arrays(pa.array(vectors.ravel()), 4)})
     pq.write_table(table, url, row_group_size=4)
 
     index_parquet(
-        [url], root, geometry=None, normalize=False,
-        metadata={"year": [2026]}, partition_by=("year", "bucket")
+        [url],
+        root,
+        geometry=None,
+        normalize=False,
+        metadata={"year": [2026]},
+        partition_by=("year", "bucket"),
     )
     catalog = Catalog(root)
     snapshot, _ = catalog.snapshot()
@@ -142,8 +145,12 @@ def test_joint_parquet_ingest_searches_one_pinned_snapshot(
 
     target = vectors[5]
     hits = knn_parquet_search(
-        root, target[None, :], k=1, normalize=False,
-        actor_pool_size=1, index_partitions={"year": 2026},
+        root,
+        target[None, :],
+        k=1,
+        normalize=False,
+        actor_pool_size=1,
+        index_partitions={"year": 2026},
     )
     assert hits.chunks[0]["url"] == url
     assert hits.offsets[0] == 1
