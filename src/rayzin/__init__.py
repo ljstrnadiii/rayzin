@@ -5,6 +5,8 @@ from rayzin.pipeline import (
     build_manifest,
     build_manifest_from_cogs,
     build_manifest_from_zarr,
+    index_cogs,
+    index_parquet,
     knn_cog_search,
     knn_zarr_search,
 )
@@ -15,6 +17,8 @@ __all__ = [
     # pipeline
     "knn_zarr_search",
     "knn_cog_search",
+    "index_cogs",
+    "index_parquet",
     # pipeline — manifest build
     "build_manifest",
     "build_manifest_from_zarr",
