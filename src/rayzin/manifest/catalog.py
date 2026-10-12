@@ -147,9 +147,15 @@ class Catalog:
         self.root = root.rstrip("/")
         self.fs: Any
         self.base: str
-        self.fs, self.base = (
-            pafs.FileSystem.from_uri(self.root) if filesystem is None else (filesystem, self.root)
-        )
+        if filesystem is None:
+            self.fs, self.base = pafs.FileSystem.from_uri(self.root)
+        else:
+            self.fs = filesystem
+            self.base = (
+                pafs.FileSystem.from_uri(self.root)[1]
+                if "://" in self.root
+                else self.root
+            )
         parsed = urlparse(self.root)
         self.prefix = parsed.path.strip("/") if parsed.scheme in ("s3", "gs", "gcs") else ""
         if store is None:
@@ -379,6 +385,18 @@ class Catalog:
             for item in info
             if item.type == pafs.FileType.File and item.path.endswith(".parquet")
         )
+
+
+def catalog_at(path: str, filesystem: Any = None) -> Catalog | None:
+    """Detect a catalog without requiring an optional S3/GCS commit client."""
+    fs, base = (
+        pafs.FileSystem.from_uri(path)
+        if filesystem is None
+        else (filesystem, pafs.FileSystem.from_uri(path)[1] if "://" in path else path)
+    )
+    if fs.get_file_info(posixpath.join(base, "HEAD.json")).type != pafs.FileType.File:
+        return None
+    return Catalog(path, filesystem=fs)
 
 
 def main() -> None:
