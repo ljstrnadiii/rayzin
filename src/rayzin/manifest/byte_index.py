@@ -166,10 +166,16 @@ def build_byte_index(
             for ref in refs:
                 ref.update(properties)
             batch.extend(refs)
-            file_rows.append({
-                "url": url, "kind": kind, "bucket": _bucket(url),
-                "decoder": decoder_path, "file_size": size, **properties,
-            })
+            file_rows.append(
+                {
+                    "url": url,
+                    "kind": kind,
+                    "bucket": _bucket(url),
+                    "decoder": decoder_path,
+                    "file_size": size,
+                    **properties,
+                }
+            )
             source_rows.append({"url": url, **properties})
         if not batch:
             continue
@@ -207,7 +213,10 @@ class ByteIndex:
     """Loads only one URL bucket at a time, and caches decoder metadata per source."""
 
     def __init__(
-        self, root: str, *, filesystem: Any = None,
+        self,
+        root: str,
+        *,
+        filesystem: Any = None,
         snapshot: dict[str, Any] | None = None,
     ) -> None:
         self.catalog = Catalog(root, filesystem=filesystem)
@@ -246,9 +255,7 @@ class ByteIndex:
                 self._registry[bucket] = self.catalog.dataset(
                     "files", partitions={"bucket": bucket}, snapshot=self.snapshot
                 )
-            rows = self._registry[bucket].to_table(
-                filter=pc.field("url") == url
-            ).to_pylist()
+            rows = self._registry[bucket].to_table(filter=pc.field("url") == url).to_pylist()
             if len(rows) != 1:
                 raise KeyError(f"Expected one source file registry entry: {url}")
             self._files[url] = rows[0]
