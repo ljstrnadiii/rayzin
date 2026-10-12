@@ -3,8 +3,8 @@
 import asyncio
 import hashlib
 import json
-from dataclasses import asdict
 from collections.abc import Callable
+from dataclasses import asdict
 from typing import Any
 from urllib.parse import urlparse
 from uuid import uuid4
