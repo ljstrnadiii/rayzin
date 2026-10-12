@@ -1,0 +1,305 @@
+"""Metadata-only byte index for existing Parquet row groups and COG tiles."""
+
+import asyncio
+import hashlib
+import json
+from collections.abc import Callable
+from dataclasses import asdict
+from typing import Any
+from urllib.parse import urlparse
+from uuid import uuid4
+
+import numpy as np
+import pyarrow as pa  # type: ignore[import-untyped]
+import pyarrow.compute as pc  # type: ignore[import-untyped]
+import pyarrow.parquet as pq  # type: ignore[import-untyped]
+
+from rayzin.manifest.catalog import Catalog
+from rayzin.readers.cog_reader import CogLayout, block_slice, cog_layout
+from rayzin.readers.parquet_reader import row_group_slice
+
+
+def _bucket(url: str) -> int:
+    return hashlib.blake2s(url.encode(), digest_size=2).digest()[0]
+
+
+def _store_path(url: str, stores: dict[str, Any], options: dict[str, Any]) -> tuple[Any, str]:
+    from obstore.store import LocalStore, from_url
+
+    parsed = urlparse(url)
+    if parsed.scheme in ("", "file"):
+        return stores.setdefault("/", LocalStore("/")), parsed.path.lstrip("/")
+    root = f"{parsed.scheme}://{parsed.netloc}"
+    if root not in stores:
+        stores[root] = from_url(root, **options)
+    return stores[root], parsed.path.lstrip("/")
+
+
+async def _cog_refs(
+    url: str, stores: dict[str, Any], options: dict[str, Any]
+) -> tuple[list[dict[str, Any]], bytes]:
+    import async_tiff
+
+    store, path = _store_path(url, stores, options)
+    tiff = await async_tiff.TIFF.open(path, store=store)
+    ifd = tiff.ifds[0]
+    layout = cog_layout(ifd)
+    offsets, lengths = ifd.tile_offsets, ifd.tile_byte_counts
+    if offsets is None or lengths is None:
+        raise ValueError("Expected a tiled TIFF")
+    if len(offsets) != layout.blocks_down * layout.blocks_across:
+        raise ValueError("Unexpected number of tile offsets")
+    payload = {**asdict(layout), "dtype": layout.dtype.str}
+    refs = []
+    for idx, (offset, length) in enumerate(zip(offsets, lengths, strict=True)):
+        row, col = divmod(idx, layout.blocks_across)
+        if not length:
+            continue
+        refs.append(
+            {
+                "url": url,
+                "bucket": _bucket(url),
+                "kind": "cog",
+                "slice": block_slice(layout, row, col),
+                "row_group": -1,
+                "tile_row": row,
+                "tile_col": col,
+                "spans": [{"column": "", "offset": int(offset), "length": int(length)}],
+            }
+        )
+    return refs, json.dumps(payload).encode()
+
+
+def _parquet_refs(url: str, filesystem: Any) -> tuple[list[dict[str, Any]], bytes, int]:
+    import pyarrow.fs as pafs  # type: ignore[import-untyped]
+
+    if filesystem is None:
+        fs, path = pafs.FileSystem.from_uri(url)
+    else:
+        fs, path = filesystem, url
+    metadata = pq.read_metadata(path, filesystem=fs)
+    size = fs.get_file_info(path).size
+    sink = pa.BufferOutputStream()
+    metadata.write_metadata_file(sink)
+    refs = []
+    for group in range(metadata.num_row_groups):
+        rg = metadata.row_group(group)
+        spans = []
+        for n in range(rg.num_columns):
+            col = rg.column(n)
+            start = col.dictionary_page_offset if col.has_dictionary_page else col.data_page_offset
+            spans.append(
+                {
+                    "column": col.path_in_schema,
+                    "offset": int(start),
+                    "length": int(col.total_compressed_size),
+                }
+            )
+        refs.append(
+            {
+                "url": url,
+                "bucket": _bucket(url),
+                "kind": "parquet",
+                "slice": row_group_slice(group),
+                "row_group": group,
+                "tile_row": -1,
+                "tile_col": -1,
+                "spans": spans,
+            }
+        )
+    return refs, sink.getvalue().to_pybytes(), int(size)
+
+
+def build_byte_index(
+    urls: list[str],
+    root: str,
+    *,
+    kind: str,
+    metadata: dict[str, list[Any]] | None = None,
+    partition_by: tuple[str, ...] = ("bucket",),
+    filesystem: Any = None,
+    store_kwargs: dict[str, Any] | None = None,
+    files_per_batch: int = 32,
+    summarize: Callable[[pa.Table], pa.Table] | None = None,
+) -> int:
+    """Index only metadata; source payload bytes are never downloaded or decoded."""
+    if kind not in ("parquet", "cog"):
+        raise ValueError(f"Unsupported source kind: {kind}")
+    if "bucket" not in partition_by:
+        raise ValueError("The physical index must be partitioned by bucket")
+    if files_per_batch < 1:
+        raise ValueError("files_per_batch must be positive")
+    if any(len(values) != len(urls) for values in (metadata or {}).values()):
+        raise ValueError("Metadata values must match URLs")
+    if set(metadata or {}) & {
+        "url",
+        "bucket",
+        "kind",
+        "slice",
+        "row_group",
+        "tile_row",
+        "tile_col",
+        "spans",
+        "decoder",
+        "file_size",
+    }:
+        raise ValueError("Metadata overrides a physical index field")
+    catalog = Catalog(root, filesystem=filesystem)
+    catalog.fs.create_dir(catalog._path("decoders"), recursive=True)
+    stores: dict[str, Any] = {}
+    for start in range(0, len(urls), files_per_batch):
+        batch = []
+        file_rows = []
+        source_rows = []
+        for i in range(start, min(start + files_per_batch, len(urls))):
+            url = urls[i]
+            if kind == "parquet":
+                refs, decoder, size = _parquet_refs(url, None)
+            else:
+                refs, decoder = asyncio.run(_cog_refs(url, stores, store_kwargs or {}))
+                store, path = _store_path(url, stores, store_kwargs or {})
+                size = int(store.head(path)["size"])
+            decoder_path = f"decoders/{uuid4().hex}.bin"
+            with catalog.fs.open_output_stream(catalog._path(decoder_path)) as out:
+                out.write(decoder)
+            properties = {name: values[i] for name, values in (metadata or {}).items()}
+            for ref in refs:
+                ref.update(properties)
+            batch.extend(refs)
+            file_rows.append(
+                {
+                    "url": url,
+                    "kind": kind,
+                    "bucket": _bucket(url),
+                    "decoder": decoder_path,
+                    "file_size": size,
+                    **properties,
+                }
+            )
+            source_rows.append({"url": url, **properties})
+        if not batch:
+            continue
+        tables = {
+            "bytes": pa.Table.from_pylist(batch),
+            "files": pa.Table.from_pylist(file_rows),
+        }
+        if summarize is not None:
+            chunks = summarize(pa.Table.from_pylist(source_rows))
+            buckets = pa.array([_bucket(url) for url in chunks.column("url").to_pylist()])
+            tables["chunks"] = chunks.append_column("bucket", buckets)
+        catalog.append_many(
+            tables,
+            partition_by={component: partition_by for component in tables},
+        )
+    return len(urls)
+
+
+def _merge_spans(spans: list[dict[str, Any]], columns: list[str]) -> list[tuple[int, int]]:
+    selected = sorted(
+        (int(s["offset"]), int(s["offset"]) + int(s["length"]))
+        for s in spans
+        if s["column"].split(".")[0] in columns
+    )
+    merged: list[tuple[int, int]] = []
+    for start, end in selected:
+        if merged and start <= merged[-1][1]:
+            merged[-1] = merged[-1][0], max(end, merged[-1][1])
+        else:
+            merged.append((start, end))
+    return merged
+
+
+class ByteIndex:
+    """Loads only one URL bucket at a time, and caches decoder metadata per source."""
+
+    def __init__(
+        self,
+        root: str,
+        *,
+        filesystem: Any = None,
+        snapshot: dict[str, Any] | None = None,
+    ) -> None:
+        self.catalog = Catalog(root, filesystem=filesystem)
+        self.snapshot = snapshot if snapshot is not None else self.catalog.snapshot()[0]
+        if "bucket" not in self.snapshot["components"].get("bytes", {}).get("partition_by", []):
+            raise ValueError("The physical index must be partitioned by bucket")
+        self.fs = self.catalog.fs
+        self.base = self.catalog.base
+        self._buckets: dict[int, Any] = {}
+        self._registry: dict[int, Any] = {}
+        self._files: dict[str, dict[str, Any]] = {}
+        self._rows: dict[str, list[dict[str, Any]]] = {}
+        self._decoder: dict[str, bytes] = {}
+        self._groups: dict[str, dict[int, dict[str, Any]]] = {}
+        self._tiles: dict[str, dict[tuple[int, int], dict[str, Any]]] = {}
+        self._parquet_info: dict[str, Any] = {}
+        self._layouts: dict[str, CogLayout] = {}
+
+    def rows(self, url: str) -> list[dict[str, Any]]:
+        if url not in self._rows:
+            bucket = _bucket(url)
+            if bucket not in self._buckets:
+                self._buckets[bucket] = self.catalog.dataset(
+                    "bytes", partitions={"bucket": bucket}, snapshot=self.snapshot
+                )
+            predicate = pc.field("url") == url
+            self._rows[url] = self._buckets[bucket].to_table(filter=predicate).to_pylist()
+            if not self._rows[url]:
+                raise KeyError(f"Source not indexed: {url}")
+        return self._rows[url]
+
+    def file(self, url: str) -> dict[str, Any]:
+        if url not in self._files:
+            bucket = _bucket(url)
+            if bucket not in self._registry:
+                self._registry[bucket] = self.catalog.dataset(
+                    "files", partitions={"bucket": bucket}, snapshot=self.snapshot
+                )
+            rows = self._registry[bucket].to_table(filter=pc.field("url") == url).to_pylist()
+            if len(rows) != 1:
+                raise KeyError(f"Expected one source file registry entry: {url}")
+            self._files[url] = rows[0]
+        return self._files[url]
+
+    def decoder(self, url: str) -> bytes:
+        if url not in self._decoder:
+            path = self.file(url)["decoder"]
+            with self.fs.open_input_file(f"{self.base}/{path}") as source:
+                self._decoder[url] = source.read()
+        return self._decoder[url]
+
+    def parquet(
+        self, url: str, group: int, columns: list[str]
+    ) -> tuple[Any, list[tuple[int, int]]]:
+        from rayzin.readers.parquet_reader import FileInfo
+
+        if url not in self._groups:
+            self._groups[url] = {ref["row_group"]: ref for ref in self.rows(url)}
+        row = self._groups[url][group]
+        if url not in self._parquet_info:
+            footer = pq.read_metadata(pa.BufferReader(self.decoder(url)))
+            field = footer.schema.to_arrow_schema().field(columns[0]).type
+            self._parquet_info[url] = FileInfo(
+                self.file(url)["file_size"],
+                footer,
+                np.dtype(field.value_type.to_pandas_dtype()),
+                field.list_size,
+            )
+        return self._parquet_info[url], _merge_spans(row["spans"], columns)
+
+    def cog_layout(self, url: str) -> CogLayout:
+        if url not in self._layouts:
+            raw = json.loads(self.decoder(url))
+            raw["dtype"] = np.dtype(raw["dtype"])
+            raw["transform"] = tuple(raw["transform"])
+            self._layouts[url] = CogLayout(**raw)
+        return self._layouts[url]
+
+    def cog(self, url: str, row: int, col: int) -> tuple[CogLayout, int, int]:
+        if url not in self._tiles:
+            self._tiles[url] = {
+                (item["tile_row"], item["tile_col"]): item for item in self.rows(url)
+            }
+        ref = self._tiles[url][row, col]
+        span = ref["spans"][0]
+        return self.cog_layout(url), int(span["offset"]), int(span["length"])

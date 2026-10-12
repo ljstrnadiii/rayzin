@@ -46,6 +46,70 @@ fits naturally into Ray Data execution.
 - Batched query input shaped `(1, d)` or `(nq, d)`, and the Euclidean pruning path, which
   `prune=False` turns off when chunk bounds cannot rule anything out.
 
+## Chunk index and atomic snapshot catalog
+
+`index_parquet` and `index_cogs` index **existing immutable** source files. They
+publish three logical components in one snapshot:
+
+- **Chunk index (`chunks`):** searchable chunk metadata, optional geometry, and
+  vector summaries. Formerly the *search manifest*.
+- **Byte index (`bytes`):** Parquet column-chunk offsets and compressed sizes, or
+  TIFF tile offsets and sizes.
+- **File registry (`files`):** source URL, size, format, and a reference to the
+  decoder metadata (Parquet footer or TIFF layout).
+
+```python
+from rayzin.index import index_parquet
+from rayzin.pipeline import knn_parquet_search
+
+root = "gs://bucket/rayzin/catalog"
+index_parquet(
+    ["gs://bucket/data/part-0.parquet"], root,
+    metadata={"year": [2026]}, partition_by=("year", "bucket"),
+)
+hits = knn_parquet_search(
+    root, queries, k=10, index_partitions={"year": 2026},
+)
+```
+
+For images, use `index_cogs` and `knn_cog_search`. Existing
+`build_manifest_*` functions and legacy search-manifest paths remain supported.
+The low-level `build_byte_index` only stages the physical byte index and file
+registry; use `index_parquet` or `index_cogs` for a **fully searchable catalog**.
+
+Each ingestion batch prepares immutable chunks/bytes/files fragments, then publishes
+all three together through **one conditional update to `HEAD.json`**. AWS S3
+uses `IfMatch`/`IfNoneMatch` ETags; GCS uses object-generation preconditions.
+Concurrent writers retry publication using the latest snapshot without rewriting
+source data or prepared fragments. The snapshot is pinned by both the search and
+the byte-range readers, so they cannot observe different catalog versions.
+
+The indexes use partitioned Parquet. Partition selection occurs **before opening
+fragment metadata**; PyArrow additionally supports Parquet column projection and
+row-group statistics pruning. A hash `bucket` partition lets the byte reader
+open just the partitions relevant to a source URL. Use additional stable,
+low-cardinality partition keys for common queries; arbitrary predicates cannot
+guarantee zero unnecessary metadata reads.
+
+Direct byte-range reads eliminate re-opening source Parquet footers and COG TIFF
+directories. Decoder sidecars are loaded lazily and cached per reader. Physical
+index construction reads only file metadata, but the optional **chunk summaries**
+require reading and decoding source embeddings once at ingestion.
+
+Periodically compact the three index components (not source embeddings):
+
+```bash
+python -m rayzin.index gs://bucket/rayzin/catalog
+```
+
+Cloud commit SDKs are optional extras (`boto3` for S3 or
+`google-cloud-storage` for GCS). Nothing runs as a persistent service.
+Old snapshots and fragments are retained; do not delete until existing readers
+can no longer reference them. Source objects must remain immutable; source
+version pinning, remote checksums, and duplicate-URL enforcement are not yet
+implemented. CI covers local consistency and range reads; production S3/GCS
+integration tests and throughput benchmarks are still needed.
+
 ## Installation
 
 Install the base package from PyPI:
