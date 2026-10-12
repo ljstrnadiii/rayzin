@@ -10,6 +10,7 @@ import ray
 from shapely.geometry.base import BaseGeometry  # type: ignore[import-untyped]
 
 from rayzin.enums import MetricType, ReaderType, SearchBackendType
+from rayzin.manifest.catalog import catalog_at
 from rayzin.manifest.filtering import rows_intersecting
 from rayzin.metrics import add_lower_bounds_fn
 from rayzin.pipeline import unit_rows
@@ -37,7 +38,9 @@ class ShardSearcher:
     ) -> None:
         import pyarrow.dataset as ds  # type: ignore[import-untyped]
 
-        dataset = ds.dataset(files, filesystem=_resolved(filesystem), format="parquet")
+        dataset = ds.dataset(
+            files, filesystem=_resolved(filesystem), format="parquet", partitioning="hive"
+        )
         columns = (
             None
             if prune
@@ -118,17 +121,32 @@ class KnnSearcher:
         prune: bool = True,
         reader: ReaderType = ReaderType.COG,
         reader_kwargs: dict[str, Any] | None = None,
+        index_partitions: dict[str, int | str] | None = None,
     ) -> None:
         import pyarrow.dataset as ds
         import pyarrow.fs as pafs  # type: ignore[import-untyped]
 
         started = time.perf_counter()
         self._normalize = normalize
+        original_path = manifest_path
         local = _resolved(filesystem)
         if local is None:
             local, manifest_path = pafs.FileSystem.from_uri(manifest_path)
             filesystem = local
-        files = sorted(ds.dataset(manifest_path, filesystem=local, format="parquet").files)
+        catalog = catalog_at(original_path, filesystem=local)
+        if catalog is None:
+            files = sorted(ds.dataset(manifest_path, filesystem=local, format="parquet").files)
+        else:
+            snapshot, _ = catalog.snapshot()
+            files = catalog.files("chunks", partitions=index_partitions, snapshot=snapshot)
+            if reader in (ReaderType.COG, ReaderType.PARQUET):
+                reader_kwargs = {
+                    "byte_index_path": original_path,
+                    "catalog_snapshot": snapshot,
+                    **(reader_kwargs or {}),
+                }
+        if not files:
+            raise ValueError("No chunk-index fragments match the selected partitions")
         shard = ray.remote(num_cpus=num_cpus_per_actor, num_gpus=num_gpus_per_actor)(ShardSearcher)
         self._shards: list[Any] = [
             shard.remote(
