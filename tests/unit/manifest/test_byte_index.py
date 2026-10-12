@@ -40,7 +40,7 @@ def test_indexed_parquet_never_opens_source_footer(
     assert len(index.rows(url)) == 3
     assert (
         index.catalog.scan(
-            filter=pc.field("year") == 2026,
+            "bytes", filter=pc.field("year") == 2026,
             partitions={"bucket": index.rows(url)[0]["bucket"]},
         ).num_rows
         == 3
@@ -113,3 +113,38 @@ def test_cog_tile_direct_read(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -
     np.testing.assert_array_equal(out, values[:, 16:32, :16].transpose(1, 2, 0).reshape(-1, 8))
     raw = indexed.run(indexed.fetch_encoded(chunk))  # type: ignore[arg-type]
     assert raw.shape == (16, 16, 8)
+
+
+def test_joint_parquet_ingest_searches_one_pinned_snapshot(
+    tmp_path: Path, ray_session: None
+) -> None:
+    from rayzin.manifest.catalog import Catalog
+    from rayzin.pipeline import index_parquet, knn_parquet_search
+
+    url = str(tmp_path / "embeddings.parquet")
+    root = str(tmp_path / "catalog")
+    vectors = np.arange(48, dtype=np.float32).reshape(12, 4)
+    table = pa.table({
+        "embedding": pa.FixedSizeListArray.from_arrays(pa.array(vectors.ravel()), 4)
+    })
+    pq.write_table(table, url, row_group_size=4)
+
+    index_parquet(
+        [url], root, geometry=None, normalize=False,
+        metadata={"year": [2026]}, partition_by=("year", "bucket")
+    )
+    catalog = Catalog(root)
+    snapshot, _ = catalog.snapshot()
+    assert set(snapshot["components"]) == {"chunks", "bytes", "files"}
+    assert all(snapshot["components"][name]["files"] for name in snapshot["components"])
+    assert catalog.scan("files", columns=["url"]).column("url").to_pylist() == [url]
+    assert len(catalog.files("chunks", partitions={"year": 2026})) == 1
+
+    target = vectors[5]
+    hits = knn_parquet_search(
+        root, target[None, :], k=1, normalize=False,
+        actor_pool_size=1, index_partitions={"year": 2026},
+    )
+    assert hits.chunks[0]["url"] == url
+    assert hits.offsets[0] == 1
+    assert hits.distances[0] == pytest.approx(0.0)
