@@ -163,8 +163,8 @@ class ParquetVectorReader:
         table = self.read_columns(self._row_group_file(url, group, self._columns()), group)
         values = table.column(self.column).combine_chunks()
         width = values.type.list_size
-        vectors = np.asarray(
-            values.values.to_numpy(zero_copy_only=False), dtype=np.float32
+        vectors = np.array(
+            values.values.to_numpy(zero_copy_only=False), dtype=np.float32, copy=True
         ).reshape(len(values), width)
         valid = np.isfinite(vectors).all(axis=1) & self.passes(table, values)
         if self._normalize:
