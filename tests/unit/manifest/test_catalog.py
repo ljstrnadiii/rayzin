@@ -9,7 +9,9 @@ from rayzin.manifest.catalog import Catalog, CommitConflict, LocalStore
 
 def test_one_snapshot_covers_all_indexes_and_compaction(tmp_path: Path) -> None:
     catalog = Catalog(str(tmp_path))
-    layouts = {part: ("year",) for part in ("chunks", "bytes", "files")}
+    layouts: dict[str, tuple[str, ...]] = {
+        part: ("year",) for part in ("chunks", "bytes", "files")
+    }
 
     def batch(year: int) -> dict[str, pa.Table]:
         return {
