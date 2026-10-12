@@ -59,7 +59,8 @@ publish three logical components in one snapshot:
   decoder metadata (Parquet footer or TIFF layout).
 
 ```python
-from rayzin.pipeline import index_parquet, knn_parquet_search
+from rayzin.index import index_parquet
+from rayzin.pipeline import knn_parquet_search
 
 root = "gs://bucket/rayzin/catalog"
 index_parquet(
@@ -98,7 +99,7 @@ require reading and decoding source embeddings once at ingestion.
 Periodically compact the three index components (not source embeddings):
 
 ```bash
-python -m rayzin.manifest.catalog gs://bucket/rayzin/catalog
+python -m rayzin.index gs://bucket/rayzin/catalog
 ```
 
 Cloud commit SDKs are optional extras (`boto3` for S3 or
