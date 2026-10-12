@@ -88,10 +88,13 @@ class CogVectorReader:
         store_kwargs: dict[str, Any] | None = None,
         decode_threads: int = 8,
         byte_index_path: str | None = None,
+        catalog_snapshot: dict[str, Any] | None = None,
     ) -> None:
         from rayzin.manifest.byte_index import ByteIndex
 
-        self._index = ByteIndex(byte_index_path) if byte_index_path else None
+        self._index = (
+            ByteIndex(byte_index_path, snapshot=catalog_snapshot) if byte_index_path else None
+        )
         self._normalize = normalize
         self.decode_threads = decode_threads
         self._store_kwargs = store_kwargs or {}
