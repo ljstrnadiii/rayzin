@@ -269,7 +269,9 @@ class Catalog:
                 state["partition_by"] = expected
                 dropped = set(remove.get(component, []))
                 if not dropped.issubset(state["files"]):
-                    raise CommitConflict(f"Input fragments were replaced by another compaction: {component}")
+                    raise CommitConflict(
+                        f"Input fragments were replaced by another compaction: {component}"
+                    )
                 state["files"] = list(dict.fromkeys(
                     [name for name in state["files"] if name not in dropped]
                     + add.get(component, [])
